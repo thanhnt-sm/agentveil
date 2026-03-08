@@ -1,11 +1,14 @@
 package router
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,10 +26,14 @@ type Provider struct {
 // Router routes requests to multiple LLM providers
 type Router struct {
 	providers    map[string]*Provider
-	routes       map[string]string // path prefix → provider name
+	routes       map[string]RouteConfig // path prefix → route config
+	sortedRoutes []string               // P2 #10: sorted by prefix length desc
 	defaultRoute string
 	strategy     LoadBalanceStrategy
 	fallback     FallbackConfig
+
+	// Codex OAuth URL rewriter (nil if disabled)
+	codexRewriter *codexRewriter
 
 	// Round-robin state
 	mu       sync.Mutex
@@ -46,7 +53,7 @@ type Router struct {
 func New(cfg *RouterConfig) (*Router, error) {
 	r := &Router{
 		providers:    make(map[string]*Provider),
-		routes:       make(map[string]string),
+		routes:       make(map[string]RouteConfig),
 		defaultRoute: cfg.DefaultRoute,
 		strategy:     cfg.LoadBalance,
 		fallback:     cfg.Fallback,
@@ -81,7 +88,8 @@ func New(cfg *RouterConfig) (*Router, error) {
 				}
 
 				// Set provider API key if configured
-				if pc.APIKey != "" {
+				// "passthrough" = keep client's original auth header (e.g. Codex IDE login token)
+				if pc.AuthMethod != "passthrough" && pc.APIKey != "" {
 					switch pc.AuthMethod {
 					case "query":
 						q := req.URL.Query()
@@ -131,8 +139,13 @@ func New(cfg *RouterConfig) (*Router, error) {
 
 	// Build routes
 	for _, rc := range cfg.Routes {
-		r.routes[rc.PathPrefix] = rc.Provider
+		r.routes[rc.PathPrefix] = rc
+		r.sortedRoutes = append(r.sortedRoutes, rc.PathPrefix)
 	}
+	// P2 #10: Sort by prefix length descending for deterministic matching
+	sort.Slice(r.sortedRoutes, func(i, j int) bool {
+		return len(r.sortedRoutes[i]) > len(r.sortedRoutes[j])
+	})
 
 	// Set default if not configured
 	if r.defaultRoute == "" {
@@ -144,6 +157,20 @@ func New(cfg *RouterConfig) (*Router, error) {
 
 	// Build round-robin and weighted lists
 	r.buildLoadBalanceLists()
+
+	// Initialize Codex OAuth URL rewriter if enabled
+	if cfg.CodexRewrite.Enabled {
+		backendURL := cfg.CodexRewrite.BackendURL
+		if backendURL == "" {
+			backendURL = DefaultCodexBackendURL
+		}
+		cr, err := newCodexRewriter(backendURL)
+		if err != nil {
+			return nil, err
+		}
+		r.codexRewriter = cr
+		slog.Info("codex OAuth rewrite enabled", "backend", backendURL)
+	}
 
 	return r, nil
 }
@@ -187,6 +214,15 @@ func (r *Router) buildLoadBalanceLists() {
 
 // ServeHTTP routes the request to the appropriate provider
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// Codex OAuth rewrite: detect JWT tokens and redirect /v1/responses to ChatGPT backend
+	if r.codexRewriter != nil && strings.HasPrefix(req.URL.Path, "/v1/responses") {
+		authHeader := req.Header.Get("Authorization")
+		if IsCodexOAuthToken(authHeader) {
+			r.codexRewriter.ServeHTTP(w, req)
+			return
+		}
+	}
+
 	providerName := r.resolveProvider(req)
 
 	if r.fallback.Enabled {
@@ -221,6 +257,16 @@ func (r *Router) serveWithFallback(w http.ResponseWriter, req *http.Request, pri
 		attempts = len(order)
 	}
 
+	// P1 #7: Save request body for retries
+	var savedBody []byte
+	if req.Body != nil {
+		savedBody, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(savedBody))
+	}
+
+	originalPath := req.URL.Path
+
 	for i := 0; i < attempts; i++ {
 		name := order[i]
 		p, ok := r.providers[name]
@@ -229,21 +275,33 @@ func (r *Router) serveWithFallback(w http.ResponseWriter, req *http.Request, pri
 			continue
 		}
 
-		// Use a response recorder to detect errors
+		// Use a response recorder to detect errors without writing to real response
 		rec := &fallbackRecorder{
 			ResponseWriter: w,
 			statusCode:     0,
 			headerWritten:  false,
 		}
 
-		originalPath := req.URL.Path
 		req.URL.Path = r.stripRoutePrefix(originalPath)
+
+		// P1 #7: Restore body for this attempt
+		if savedBody != nil {
+			req.Body = io.NopCloser(bytes.NewReader(savedBody))
+			req.ContentLength = int64(len(savedBody))
+		}
 
 		slog.Debug("routing request (fallback)", "provider", name, "attempt", i+1, "path", req.URL.Path)
 		p.Proxy.ServeHTTP(rec, req)
 
-		// If successful or client error, return (don't retry on 4xx)
+		// If successful or client error, flush to real writer and return (don't retry on 4xx)
 		if rec.statusCode > 0 && rec.statusCode < 500 {
+			rec.flush()
+			return
+		}
+
+		// If statusCode is 0 but body was written, proxy wrote directly — treat as done
+		if rec.statusCode == 0 && len(rec.body) > 0 {
+			rec.flush()
 			return
 		}
 
@@ -257,7 +315,9 @@ func (r *Router) serveWithFallback(w http.ResponseWriter, req *http.Request, pri
 		}
 	}
 
-	http.Error(w, `{"error":"all_providers_failed"}`, http.StatusBadGateway)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	w.Write([]byte(`{"error":"all_providers_failed"}`))
 }
 
 // resolveProvider determines which provider to use for a request
@@ -269,10 +329,10 @@ func (r *Router) resolveProvider(req *http.Request) string {
 		}
 	}
 
-	// 2. Check path-based routes
-	for prefix, provider := range r.routes {
+	// 2. Check path-based routes (sorted by prefix length desc for deterministic matching)
+	for _, prefix := range r.sortedRoutes {
 		if strings.HasPrefix(req.URL.Path, prefix) {
-			return provider
+			return r.routes[prefix].Provider
 		}
 	}
 
@@ -346,10 +406,11 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
-// stripRoutePrefix removes the route prefix from the path
+// stripRoutePrefix removes the route prefix from the path, only if the route has StripPrefix=true.
+// E.g. /gemini/v1beta → /v1beta (strip_prefix: true), but /v1/responses stays as-is.
 func (r *Router) stripRoutePrefix(path string) string {
-	for prefix := range r.routes {
-		if strings.HasPrefix(path, prefix) {
+	for prefix, rc := range r.routes {
+		if strings.HasPrefix(path, prefix) && rc.StripPrefix {
 			stripped := strings.TrimPrefix(path, prefix)
 			if stripped == "" {
 				return "/"
@@ -387,17 +448,32 @@ func (r *Router) SetHealthy(name string, healthy bool) {
 	}
 }
 
-// fallbackRecorder captures the response to detect server errors
+// fallbackRecorder buffers the response to detect server errors.
+// Headers and body are buffered so fallback retries don't leak partial
+// responses to the real ResponseWriter (which would cause "superfluous
+// response.WriteHeader call" warnings from net/http).
 type fallbackRecorder struct {
 	http.ResponseWriter
 	statusCode    int
 	headerWritten bool
+	flushed       bool // guard against double flush
+	headers       http.Header
+	body          []byte
+}
+
+func (fr *fallbackRecorder) Header() http.Header {
+	if fr.headers == nil {
+		fr.headers = make(http.Header)
+	}
+	return fr.headers
 }
 
 func (fr *fallbackRecorder) WriteHeader(code int) {
+	if fr.headerWritten {
+		return // guard: ignore duplicate WriteHeader calls
+	}
 	fr.statusCode = code
 	fr.headerWritten = true
-	fr.ResponseWriter.WriteHeader(code)
 }
 
 func (fr *fallbackRecorder) Write(b []byte) (int, error) {
@@ -405,5 +481,35 @@ func (fr *fallbackRecorder) Write(b []byte) (int, error) {
 		fr.statusCode = http.StatusOK
 		fr.headerWritten = true
 	}
-	return fr.ResponseWriter.Write(b)
+	fr.body = append(fr.body, b...)
+	return len(b), nil
+}
+
+// flush writes the buffered response to the real ResponseWriter.
+func (fr *fallbackRecorder) flush() {
+	if fr.flushed {
+		return // guard: prevent superfluous WriteHeader
+	}
+	fr.flushed = true
+
+	dst := fr.ResponseWriter.Header()
+	for k, vv := range fr.headers {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+	if fr.statusCode > 0 {
+		fr.ResponseWriter.WriteHeader(fr.statusCode)
+	}
+	if len(fr.body) > 0 {
+		fr.ResponseWriter.Write(fr.body) //nolint:errcheck
+	}
+}
+
+// Flush implements http.Flusher so that httputil.ReverseProxy can
+// stream SSE events through the fallback recorder without hanging.
+func (fr *fallbackRecorder) Flush() {
+	if f, ok := fr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

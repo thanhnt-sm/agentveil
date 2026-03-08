@@ -159,8 +159,8 @@ func newTestConfig() *RouterConfig {
 			{Name: "secondary", BaseURL: "http://secondary.test", Priority: 2, Weight: 1, Enabled: true, TimeoutSec: 5},
 		},
 		Routes: []RouteConfig{
-			{PathPrefix: "/v1/primary", Provider: "primary"},
-			{PathPrefix: "/v1/secondary", Provider: "secondary"},
+			{PathPrefix: "/v1/primary", Provider: "primary", StripPrefix: true},
+			{PathPrefix: "/v1/secondary", Provider: "secondary", StripPrefix: true},
 		},
 		Fallback:     FallbackConfig{Enabled: false},
 		LoadBalance:  StrategyPriority,
@@ -371,8 +371,8 @@ func TestServeHTTP_RouteToProvider(t *testing.T) {
 			{Name: "secondary", BaseURL: secondary.URL, Priority: 2, Enabled: true, TimeoutSec: 5},
 		},
 		Routes: []RouteConfig{
-			{PathPrefix: "/v1/primary", Provider: "primary"},
-			{PathPrefix: "/v1/secondary", Provider: "secondary"},
+			{PathPrefix: "/v1/primary", Provider: "primary", StripPrefix: true},
+			{PathPrefix: "/v1/secondary", Provider: "secondary", StripPrefix: true},
 		},
 		LoadBalance:  StrategyPriority,
 		DefaultRoute: "primary",
@@ -439,6 +439,155 @@ func TestServeHTTP_UnhealthyProvider(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestServeHTTP_FallbackSuccess(t *testing.T) {
+	// Primary returns 502, secondary returns 200
+	// The real ResponseWriter should only see the 200 response.
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":"primary_down"}`))
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Provider", "secondary")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"result":"from_secondary"}`))
+	}))
+	defer secondary.Close()
+
+	cfg := &RouterConfig{
+		Providers: []ProviderConfig{
+			{Name: "primary", BaseURL: primary.URL, Priority: 1, Enabled: true, TimeoutSec: 5},
+			{Name: "secondary", BaseURL: secondary.URL, Priority: 2, Enabled: true, TimeoutSec: 5},
+		},
+		Fallback:     FallbackConfig{Enabled: true, MaxAttempts: 2, RetryDelaySec: 0},
+		LoadBalance:  StrategyPriority,
+		DefaultRoute: "primary",
+	}
+
+	router, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Should get the secondary's 200 response, not the primary's 502
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 from fallback, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "from_secondary") {
+		t.Errorf("expected secondary response body, got %s", body)
+	}
+}
+
+func TestServeHTTP_FallbackAllFail(t *testing.T) {
+	// Both providers return 500
+	fail1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"fail1"}`))
+	}))
+	defer fail1.Close()
+
+	fail2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"fail2"}`))
+	}))
+	defer fail2.Close()
+
+	cfg := &RouterConfig{
+		Providers: []ProviderConfig{
+			{Name: "p1", BaseURL: fail1.URL, Priority: 1, Enabled: true, TimeoutSec: 5},
+			{Name: "p2", BaseURL: fail2.URL, Priority: 2, Enabled: true, TimeoutSec: 5},
+		},
+		Fallback:     FallbackConfig{Enabled: true, MaxAttempts: 2, RetryDelaySec: 0},
+		LoadBalance:  StrategyPriority,
+		DefaultRoute: "p1",
+	}
+
+	router, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 when all fail, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "all_providers_failed") {
+		t.Errorf("expected all_providers_failed error, got %s", body)
+	}
+}
+
+func TestFallbackRecorder_NoSuperfluous(t *testing.T) {
+	// Test that fallbackRecorder guards against duplicate WriteHeader calls
+	w := httptest.NewRecorder()
+	rec := &fallbackRecorder{
+		ResponseWriter: w,
+	}
+
+	// First WriteHeader should be recorded
+	rec.WriteHeader(http.StatusBadGateway)
+	if rec.statusCode != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", rec.statusCode)
+	}
+
+	// Second WriteHeader should be silently ignored
+	rec.WriteHeader(http.StatusOK)
+	if rec.statusCode != http.StatusBadGateway {
+		t.Errorf("second WriteHeader should be ignored, got %d", rec.statusCode)
+	}
+
+	// The real writer should NOT have received any WriteHeader yet (buffered)
+	if w.Code != http.StatusOK { // httptest.NewRecorder defaults to 200
+		t.Errorf("real writer should not have been written to yet, got %d", w.Code)
+	}
+}
+
+func TestFallbackRecorder_Flush(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &fallbackRecorder{
+		ResponseWriter: w,
+	}
+
+	// Set headers and write body to recorder
+	rec.Header().Set("Content-Type", "application/json")
+	rec.Header().Set("X-Custom", "test")
+	rec.WriteHeader(http.StatusCreated)
+	rec.Write([]byte(`{"flushed":true}`))
+
+	// Before flush, real writer should be untouched
+	if w.Body.Len() != 0 {
+		t.Error("real writer body should be empty before flush")
+	}
+
+	// Flush to real writer
+	rec.flush()
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201 after flush, got %d", w.Code)
+	}
+	if w.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("expected Content-Type header after flush")
+	}
+	if w.Header().Get("X-Custom") != "test" {
+		t.Errorf("expected X-Custom header after flush")
+	}
+	if w.Body.String() != `{"flushed":true}` {
+		t.Errorf("expected flushed body, got %s", w.Body.String())
 	}
 }
 
@@ -657,3 +806,117 @@ func TestAdaptFromOpenAI_EmptyChoices(t *testing.T) {
 		t.Errorf("expected empty content, got '%s'", result.Content)
 	}
 }
+
+// === OpenAI /v1/responses Route Tests ===
+
+func newOpenAIRouteConfig() *RouterConfig {
+	return &RouterConfig{
+		Providers: []ProviderConfig{
+			{Name: "anthropic", BaseURL: "http://anthropic.test", Priority: 1, Enabled: true, TimeoutSec: 5},
+			{Name: "openai", BaseURL: "http://openai.test", Priority: 2, Enabled: true, TimeoutSec: 5},
+		},
+		Routes: []RouteConfig{
+			{PathPrefix: "/v1/responses", Provider: "openai"},
+			{PathPrefix: "/v1/chat", Provider: "openai"},
+			{PathPrefix: "/v1/models", Provider: "openai"},
+			{PathPrefix: "/v1/embeddings", Provider: "openai"},
+			{PathPrefix: "/v1/completions", Provider: "openai"},
+		},
+		LoadBalance:  StrategyPriority,
+		DefaultRoute: "anthropic",
+	}
+}
+
+func TestRouteResponses_ToOpenAI(t *testing.T) {
+	cfg := newOpenAIRouteConfig()
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"/v1/responses", "openai"},
+		{"/v1/responses/resp_abc123", "openai"},
+		{"/v1/responses/resp_abc123/cancel", "openai"},
+		{"/v1/chat/completions", "openai"},
+		{"/v1/models", "openai"},
+		{"/v1/embeddings", "openai"},
+		{"/v1/completions", "openai"},
+		{"/v1/messages", "anthropic"},       // Anthropic-specific → default
+		{"/v1/some/unknown", "anthropic"},    // Unknown → default
+	}
+
+	for _, tt := range tests {
+		req := httptest.NewRequest(http.MethodPost, tt.path, nil)
+		got := r.resolveProvider(req)
+		if got != tt.expected {
+			t.Errorf("resolveProvider(%s) = %s, want %s", tt.path, got, tt.expected)
+		}
+	}
+}
+
+func TestServeHTTP_ResponsesAPI(t *testing.T) {
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_test","object":"response","status":"completed"}`))
+	}))
+	defer openai.Close()
+
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // Anthropic doesn't have /v1/responses
+		w.Write([]byte(`{"error":"not_found"}`))
+	}))
+	defer anthropic.Close()
+
+	cfg := &RouterConfig{
+		Providers: []ProviderConfig{
+			{Name: "anthropic", BaseURL: anthropic.URL, Priority: 1, Enabled: true, TimeoutSec: 5},
+			{Name: "openai", BaseURL: openai.URL, Priority: 2, Enabled: true, TimeoutSec: 5},
+		},
+		Routes: []RouteConfig{
+			{PathPrefix: "/v1/responses", Provider: "openai"},
+			{PathPrefix: "/v1/chat", Provider: "openai"},
+		},
+		LoadBalance:  StrategyPriority,
+		DefaultRoute: "anthropic",
+	}
+
+	router, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// POST /v1/responses should reach OpenAI (200), not Anthropic (404)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4o","input":"hello"}`))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 from OpenAI, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "resp_test") {
+		t.Errorf("expected OpenAI response body, got %s", body)
+	}
+}
+
+func TestFallbackRecorder_Flusher(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &fallbackRecorder{
+		ResponseWriter: w,
+	}
+
+	// fallbackRecorder should implement http.Flusher
+	if _, ok := interface{}(rec).(http.Flusher); !ok {
+		t.Error("fallbackRecorder should implement http.Flusher")
+	}
+
+	// Calling Flush should not panic
+	rec.Flush()
+}
+

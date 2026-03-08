@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/vurakit/agentveil/internal/vault"
@@ -13,6 +13,7 @@ import (
 
 // sseRehydrator wraps an SSE response body and rehydrates PII tokens line-by-line
 type sseRehydrator struct {
+	source    io.ReadCloser // P1 FIX #5: store original body for proper Close()
 	reader    *bufio.Scanner
 	vault     *vault.Vault
 	sessionID string
@@ -24,6 +25,7 @@ type sseRehydrator struct {
 
 func newSSERehydrator(body io.ReadCloser, v *vault.Vault, sessionID string) io.ReadCloser {
 	return &sseRehydrator{
+		source:    body,
 		reader:    bufio.NewScanner(body),
 		vault:     v,
 		sessionID: sessionID,
@@ -45,7 +47,7 @@ func (s *sseRehydrator) Read(p []byte) (int, error) {
 	if !s.loaded {
 		mappings, err := s.vault.LookupAll(context.Background(), s.sessionID)
 		if err != nil {
-			log.Printf("[sse] failed to load vault mappings: %v", err)
+			slog.Warn("failed to load vault mappings for SSE", "error", err, "session", s.sessionID)
 		}
 		s.mappings = mappings
 		s.loaded = true
@@ -76,6 +78,10 @@ func (s *sseRehydrator) Read(p []byte) (int, error) {
 	return s.buf.Read(p)
 }
 
+// P1 FIX #5: Close the underlying response body to prevent connection leaks
 func (s *sseRehydrator) Close() error {
+	if s.source != nil {
+		return s.source.Close()
+	}
 	return nil
 }

@@ -1,7 +1,7 @@
 # Agent Veil — Multi-Provider Router Configuration
 #
 # API keys can reference env vars with $ENV_VAR syntax.
-# Auth methods: "header" (Authorization: Bearer) or "query" (?key=...)
+# Auth methods: "header" (Authorization: Bearer), "x-api-key", or "query" (?key=...)
 
 providers:
   - name: anthropic
@@ -12,25 +12,53 @@ providers:
     priority: 1
     enabled: true
 
+  - name: openai
+    base_url: https://api.openai.com
+    api_key: $OPENAI_API_KEY
+    auth_method: passthrough          # preserve client's auth (e.g. Codex IDE login token)
+    model: gpt-4
+    priority: 2
+    enabled: true
+
   - name: gemini
     base_url: https://generativelanguage.googleapis.com
     api_key: $GOOGLE_API_KEY
     auth_method: query
     auth_param: key
     model: gemini-pro
-    priority: 2
+    priority: 3
     enabled: true
 
 routes:
+  # OpenAI Responses API (used by Codex IDE)
+  - path_prefix: /v1/responses
+    provider: openai
+  # OpenAI Chat Completions API
+  - path_prefix: /v1/chat
+    provider: openai
+  # OpenAI Models API
+  - path_prefix: /v1/models
+    provider: openai
+  # OpenAI Embeddings API
+  - path_prefix: /v1/embeddings
+    provider: openai
+  # OpenAI Completions API (legacy)
+  - path_prefix: /v1/completions
+    provider: openai
   # /gemini/* requests → strip prefix, forward to Gemini API
   - path_prefix: /gemini
     provider: gemini
+    strip_prefix: true
   # All other paths (e.g. /v1/messages) → default_route (anthropic), no stripping
 
 fallback:
   enabled: true
   max_attempts: 2
-  retry_delay_sec: 1
+  retry_delay_sec: 2
 
 load_balance: priority
 default_route: anthropic
+
+codex_rewrite:
+  enabled: true
+  backend_url: https://chatgpt.com/backend-api/codex

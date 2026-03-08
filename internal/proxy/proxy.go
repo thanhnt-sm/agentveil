@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -90,8 +90,8 @@ const MaxBodySize = 10 * 1024 * 1024
 // Handler returns the HTTP handler with middleware chain
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Chain: [auth →] [promptGuard →] securityEnforcer → roleMiddleware → proxy
-	var handler http.Handler = s.securityEnforcer(s.roleMiddleware(s.proxy))
+	// Chain: [auth →] [promptGuard →] securityEnforcer → RoleMiddleware → proxy
+	var handler http.Handler = securityEnforcer(RoleMiddleware(s.config.DefaultRole)(s.proxy))
 	if s.promptGuard != nil {
 		handler = promptguard.Middleware(s.promptGuard)(handler)
 	}
@@ -127,41 +127,8 @@ func (s *Server) director(req *http.Request) {
 		return
 	}
 
-	// Limit request body size to prevent abuse
-	limited := io.LimitReader(req.Body, MaxBodySize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		log.Printf("[proxy] error reading request body: %v", err)
-		return
-	}
-	req.Body.Close()
-
-	if int64(len(body)) > MaxBodySize {
-		log.Printf("[proxy] request body too large: %d bytes", len(body))
-		return
-	}
-
 	sessionID := extractSessionID(req)
-	anonymized, mapping := s.detector.Anonymize(string(body))
-
-	if len(mapping) > 0 {
-		log.Printf("[proxy] anonymized %d PII entities for session %s", len(mapping), sessionID)
-
-		if err := s.vault.Store(context.Background(), sessionID, mapping); err != nil {
-			log.Printf("[proxy] vault store error: %v", err)
-		}
-
-		if s.webhook != nil {
-			s.webhook.Emit(webhook.Event{
-				Type:      webhook.EventPIIDetected,
-				SessionID: sessionID,
-				Data:      map[string]any{"count": len(mapping), "source": "proxy"},
-			})
-		}
-	}
-
-	req.Body = io.NopCloser(bytes.NewBufferString(anonymized))
-	req.ContentLength = int64(len(anonymized))
+	anonymizeBody(req, s.detector, s.vault, sessionID, s.webhook)
 }
 
 // modifyResponse handles outbound rehydration for non-streaming responses
@@ -240,7 +207,7 @@ func maskValue(val string) string {
 
 // errorHandler handles proxy errors
 func (s *Server) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("[proxy] upstream error: %v", err)
+	slog.Warn("upstream error", "error", err, "path", r.URL.Path)
 	http.Error(w, `{"error":"upstream_error","message":"failed to reach LLM provider"}`, http.StatusBadGateway)
 }
 
@@ -265,7 +232,6 @@ func extractSessionIDFromResponse(resp *http.Response) string {
 
 // AnonymizeRequest returns a request modifier that anonymizes PII in the request body.
 // Used by the router to apply PII protection in multi-provider mode.
-// If a webhook Dispatcher is provided, PII detection events will be emitted.
 func AnonymizeRequest(det *detector.Detector, v *vault.Vault, wh ...*webhook.Dispatcher) func(*http.Request) {
 	var dispatcher *webhook.Dispatcher
 	if len(wh) > 0 {
@@ -276,41 +242,8 @@ func AnonymizeRequest(det *detector.Detector, v *vault.Vault, wh ...*webhook.Dis
 		if req.Body == nil || (req.Method != http.MethodPost && req.Method != http.MethodPut) {
 			return
 		}
-
-		limited := io.LimitReader(req.Body, MaxBodySize+1)
-		body, err := io.ReadAll(limited)
-		if err != nil {
-			log.Printf("[router] error reading request body: %v", err)
-			return
-		}
-		req.Body.Close()
-
-		if int64(len(body)) > MaxBodySize {
-			log.Printf("[router] request body too large: %d bytes", len(body))
-			return
-		}
-
 		sessionID := extractSessionID(req)
-		anonymized, mapping := det.Anonymize(string(body))
-
-		if len(mapping) > 0 {
-			log.Printf("[router] anonymized %d PII entities for session %s", len(mapping), sessionID)
-
-			if err := v.Store(context.Background(), sessionID, mapping); err != nil {
-				log.Printf("[router] vault store error: %v", err)
-			}
-
-			if dispatcher != nil {
-				dispatcher.Emit(webhook.Event{
-					Type:      webhook.EventPIIDetected,
-					SessionID: sessionID,
-					Data:      map[string]any{"count": len(mapping), "source": "router"},
-				})
-			}
-		}
-
-		req.Body = io.NopCloser(bytes.NewBufferString(anonymized))
-		req.ContentLength = int64(len(anonymized))
+		anonymizeBody(req, det, v, sessionID, dispatcher)
 	}
 }
 
@@ -357,40 +290,11 @@ func RehydrateResponse(v *vault.Vault, defaultRole string) func(*http.Response) 
 			result = strings.ReplaceAll(result, token, replacement)
 		}
 
-		log.Printf("[router] rehydrated %d tokens for session %s (role=%s)", len(mappings), sessionID, role)
+		slog.Info("PII rehydrated", "count", len(mappings), "session", sessionID, "role", role)
 
 		resp.Body = io.NopCloser(bytes.NewBufferString(result))
 		resp.ContentLength = int64(len(result))
 		return nil
-	}
-}
-
-// RoleMiddleware returns standalone middleware that sets default role.
-// Used in router mode where there's no Server instance.
-func RoleMiddleware(defaultRole string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role := r.Header.Get("X-User-Role")
-			if role == "" {
-				role = defaultRole
-				r.Header.Set("X-User-Role", role)
-			}
-
-			role = strings.ToLower(role)
-			switch role {
-			case "admin", "viewer", "operator":
-				// allowed
-			default:
-				log.Printf("[middleware] rejected unknown role: %s", role)
-				http.Error(w, `{"error":"forbidden","message":"unknown role"}`, http.StatusForbidden)
-				return
-			}
-
-			log.Printf("[middleware] %s %s role=%s session=%s",
-				r.Method, r.URL.Path, role, extractSessionID(r))
-
-			next.ServeHTTP(w, r)
-		})
 	}
 }
 

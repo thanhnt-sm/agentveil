@@ -24,8 +24,9 @@ type ProviderConfig struct {
 
 // RouteConfig maps a path prefix to a provider
 type RouteConfig struct {
-	PathPrefix string `yaml:"path_prefix"` // e.g. "/v1/openai"
-	Provider   string `yaml:"provider"`    // provider name
+	PathPrefix  string `yaml:"path_prefix"`  // e.g. "/v1/openai"
+	Provider    string `yaml:"provider"`     // provider name
+	StripPrefix bool   `yaml:"strip_prefix"` // if true, remove prefix before forwarding (e.g. /gemini/v1 → /v1)
 }
 
 // FallbackConfig configures fallback behavior
@@ -51,6 +52,7 @@ type RouterConfig struct {
 	Fallback     FallbackConfig      `yaml:"fallback"`
 	LoadBalance  LoadBalanceStrategy `yaml:"load_balance"`
 	DefaultRoute string              `yaml:"default_route"` // default provider name
+	CodexRewrite CodexRewriteConfig  `yaml:"codex_rewrite"` // Codex OAuth URL rewrite
 }
 
 // LoadConfig reads router configuration from a YAML file

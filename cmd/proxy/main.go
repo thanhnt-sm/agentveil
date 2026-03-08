@@ -52,6 +52,15 @@ func main() {
 
 	// Vault
 	v := vault.NewWithClient(redisClient)
+
+	// P3 #18: Configurable vault TTL
+	if vaultTTL := envOr("VEIL_VAULT_TTL", ""); vaultTTL != "" {
+		if d, err := time.ParseDuration(vaultTTL); err == nil {
+			v.SetTTL(d)
+			logger.Info("vault TTL configured", "ttl", d)
+		}
+	}
+
 	if encryptionKey != "" {
 		keyBytes, err := hex.DecodeString(encryptionKey)
 		if err != nil || len(keyBytes) != 32 {
@@ -65,6 +74,10 @@ func main() {
 		}
 		v.SetEncryptor(enc)
 		logger.Info("vault encryption enabled (AES-256-GCM)")
+	} else {
+		// P0 #2: Loud warning when PII will be stored unencrypted
+		logger.Warn("⚠️  VEIL_ENCRYPTION_KEY not set — PII stored UNENCRYPTED in Redis!")
+		logger.Warn("⚠️  Set VEIL_ENCRYPTION_KEY for production use")
 	}
 
 	// Detector
@@ -131,6 +144,13 @@ func main() {
 		mux.HandleFunc("/scan", proxy.HandleScan(det))
 		mux.HandleFunc("/audit", proxy.HandleAudit())
 
+		// Dashboard UI + API
+		mux.HandleFunc("/dashboard", proxy.HandleDashboard())
+		mux.HandleFunc("/dashboard/", proxy.HandleDashboard())
+		mux.HandleFunc("/dashboard/api/status", proxy.HandleDashboardStatus(rt.GetProviders(), true))
+		mux.HandleFunc("/dashboard/api/logs", proxy.HandleDashboardLogs())
+		mux.HandleFunc("/dashboard/api/reports", proxy.HandleDashboardReports())
+
 		// Chain: auth → role → router
 		var routerHandler http.Handler = rt
 		routerHandler = proxy.RoleMiddleware(defaultRole)(routerHandler)
@@ -166,7 +186,7 @@ func main() {
 		Addr:         listenAddr,
 		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: 600 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

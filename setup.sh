@@ -500,7 +500,7 @@ do_status() {
 
     # Service
     if is_macos; then
-        if launchctl list 2>/dev/null | grep -q "$PLIST_NAME"; then
+        if launchctl print "gui/$(id -u)/$PLIST_NAME" &>/dev/null; then
             ok "Service:   loaded (launchd)"
         else
             fail "Service:   not loaded"

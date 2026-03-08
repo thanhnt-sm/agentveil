@@ -1,0 +1,17 @@
+{
+  "version": "0.16.0",
+  "environments": [
+    "antigravity"
+  ],
+  "phases": [
+    "requirements",
+    "design",
+    "planning",
+    "implementation",
+    "testing",
+    "deployment",
+    "monitoring"
+  ],
+  "createdAt": "2026-03-08T07:47:22.813Z",
+  "updatedAt": "2026-03-08T07:47:22.829Z"
+}

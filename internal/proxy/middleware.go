@@ -1,47 +1,51 @@
 package proxy
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 )
 
-// roleMiddleware checks X-User-Role header and enforces access control
-func (s *Server) roleMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		role := r.Header.Get("X-User-Role")
-		if role == "" {
-			role = s.config.DefaultRole
-			r.Header.Set("X-User-Role", role)
-		}
+// RoleMiddleware returns middleware that sets/validates X-User-Role header.
+// This is the SINGLE exported version used by both single-target and router modes.
+// P2 FIX #9: Removed duplicate unexported roleMiddleware method.
+func RoleMiddleware(defaultRole string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			role := r.Header.Get("X-User-Role")
+			if role == "" {
+				role = defaultRole
+				r.Header.Set("X-User-Role", role)
+			}
 
-		role = strings.ToLower(role)
+			role = strings.ToLower(role)
 
-		// Validate role
-		switch role {
-		case "admin", "viewer", "operator":
-			// allowed roles
-		default:
-			log.Printf("[middleware] rejected unknown role: %s", role)
-			http.Error(w, `{"error":"forbidden","message":"unknown role"}`, http.StatusForbidden)
-			return
-		}
+			// Validate role
+			switch role {
+			case "admin", "viewer", "operator":
+				// allowed
+			default:
+				slog.Warn("rejected unknown role", "role", role, "path", r.URL.Path)
+				http.Error(w, `{"error":"forbidden","message":"unknown role"}`, http.StatusForbidden)
+				return
+			}
 
-		log.Printf("[middleware] %s %s role=%s session=%s",
-			r.Method, r.URL.Path, role, extractSessionID(r))
+			slog.Info("request",
+				"method", r.Method, "path", r.URL.Path,
+				"role", role, "session", extractSessionID(r))
 
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
-// securityEnforcer checks for blatant data exfiltration attempts
-func (s *Server) securityEnforcer(next http.Handler) http.Handler {
+// securityEnforcer checks for blatant data exfiltration attempts in headers
+func securityEnforcer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check for suspicious patterns in headers
 		for key, values := range r.Header {
 			for _, v := range values {
 				if containsSuspiciousPayload(key) || containsSuspiciousPayload(v) {
-					log.Printf("[security] blocked suspicious header: %s", key)
+					slog.Warn("blocked suspicious header", "header", key, "path", r.URL.Path)
 					http.Error(w, `{"error":"forbidden","message":"security violation detected"}`, http.StatusForbidden)
 					return
 				}
