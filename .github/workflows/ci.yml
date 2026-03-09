@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   test:
@@ -54,6 +54,24 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+
+      - name: Check for insecure math/rand
+        run: |
+          if grep -rn 'math/rand' --include='*.go' | grep -v _test.go | grep -v vendor; then
+            echo "ERROR: math/rand in production code. Use crypto/rand."
+            exit 1
+          fi
+
+      - name: Check unbounded context.Background
+        run: |
+          HITS=$(grep -rn 'context.Background()' --include='*.go' \
+            | grep -v _test.go \
+            | grep -v 'WithTimeout\|WithCancel\|WithDeadline' \
+            | grep -v 'cmd/\|examples/\|sdk/' || true)
+          if [ -n "$HITS" ]; then
+            echo "WARNING: Unbounded context.Background():"
+            echo "$HITS"
+          fi
 
   component-test:
     runs-on: ubuntu-latest
