@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -132,9 +133,9 @@ func TestSendSlack_HTTPServer(t *testing.T) {
 }
 
 func TestEmit_MultipleDestinations(t *testing.T) {
-	var count int
+	var count atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count++
+		count.Add(1)
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
@@ -151,8 +152,8 @@ func TestEmit_MultipleDestinations(t *testing.T) {
 	d.Emit(Event{Type: EventPIIDetected, SessionID: "multi"})
 	time.Sleep(1 * time.Second)
 
-	if count < 1 {
-		t.Errorf("expected ≥1 webhook calls, got %d", count)
+	if count.Load() < 1 {
+		t.Errorf("expected ≥1 webhook calls, got %d", count.Load())
 	}
 }
 
