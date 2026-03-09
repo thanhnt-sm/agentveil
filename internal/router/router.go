@@ -35,6 +35,9 @@ type Router struct {
 	// Codex OAuth URL rewriter (nil if disabled)
 	codexRewriter *codexRewriter
 
+	// P3 #22: WebSocket proxy (nil if disabled)
+	wsProxy *WebSocketProxy
+
 	// Round-robin state
 	mu       sync.Mutex
 	rrIndex  int
@@ -172,6 +175,12 @@ func New(cfg *RouterConfig) (*Router, error) {
 		slog.Info("codex OAuth rewrite enabled", "backend", backendURL)
 	}
 
+	// P3 #22: Initialize WebSocket proxy if enabled
+	if cfg.WebSocket.Enabled {
+		r.wsProxy = NewWebSocketProxy(cfg.WebSocket)
+		slog.Info("websocket proxy enabled")
+	}
+
 	return r, nil
 }
 
@@ -183,6 +192,25 @@ func (r *Router) SetRequestModifier(fn func(*http.Request)) {
 // SetResponseModifier sets a function that modifies responses before returning to client
 func (r *Router) SetResponseModifier(fn func(*http.Response) error) {
 	r.responseModifier = fn
+}
+
+// HotSwap atomically swaps this router's internals with those from another router.
+// N12: Enables config hot-reload without restart.
+func (r *Router) HotSwap(other *Router) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.providers = other.providers
+	r.routes = other.routes
+	r.sortedRoutes = other.sortedRoutes
+	r.defaultRoute = other.defaultRoute
+	r.strategy = other.strategy
+	r.fallback = other.fallback
+	r.codexRewriter = other.codexRewriter
+	r.wsProxy = other.wsProxy
+	r.rrList = other.rrList
+	r.rrIndex = 0
+	r.weightedList = other.weightedList
 }
 
 func (r *Router) buildLoadBalanceLists() {
@@ -214,6 +242,16 @@ func (r *Router) buildLoadBalanceLists() {
 
 // ServeHTTP routes the request to the appropriate provider
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// P3 #22: WebSocket upgrade — proxy as a raw TCP tunnel
+	if r.wsProxy != nil && IsWebSocketUpgrade(req) {
+		providerName := r.resolveProvider(req)
+		if p, ok := r.providers[providerName]; ok {
+			slog.Info("websocket routing", "provider", providerName, "path", req.URL.Path)
+			r.wsProxy.ServeHTTP(w, req, p.Target)
+			return
+		}
+	}
+
 	// Codex OAuth rewrite: detect JWT tokens and redirect /v1/responses to ChatGPT backend
 	if r.codexRewriter != nil && strings.HasPrefix(req.URL.Path, "/v1/responses") {
 		authHeader := req.Header.Get("Authorization")

@@ -220,7 +220,8 @@ func handleScan(args []string) {
 
 	var text string
 	if args[0] == "-" {
-		data, err := io.ReadAll(os.Stdin)
+		// P3 #20: Limit CLI scan input to 10MB to prevent OOM
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 10<<20))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
 			os.Exit(1)
@@ -228,6 +229,11 @@ func handleScan(args []string) {
 		text = string(data)
 	} else {
 		text = strings.Join(args, " ")
+	}
+
+	if len(text) > 10<<20 {
+		fmt.Fprintf(os.Stderr, "Input too large (%d bytes). Max: 10MB\n", len(text))
+		os.Exit(1)
 	}
 
 	det := detector.New()

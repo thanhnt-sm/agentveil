@@ -330,3 +330,23 @@ func (st *SessionTracker) Cleanup() {
 		}
 	}
 }
+
+// StartCleanup launches a background goroutine that runs Cleanup every 5 minutes.
+// Returns a stop function to cancel the goroutine.
+// P2 #16: Auto-start cleanup to prevent unbounded session accumulation.
+func (st *SessionTracker) StartCleanup() func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				st.Cleanup()
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
+}

@@ -53,6 +53,7 @@ type RouterConfig struct {
 	LoadBalance  LoadBalanceStrategy `yaml:"load_balance"`
 	DefaultRoute string              `yaml:"default_route"` // default provider name
 	CodexRewrite CodexRewriteConfig  `yaml:"codex_rewrite"` // Codex OAuth URL rewrite
+	WebSocket    WebSocketConfig     `yaml:"websocket"`      // P3 #22: WebSocket proxy config
 }
 
 // LoadConfig reads router configuration from a YAML file

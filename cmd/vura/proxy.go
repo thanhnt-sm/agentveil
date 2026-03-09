@@ -1,118 +1,77 @@
 package main
 
 import (
-	"context"
-	"encoding/hex"
 	"fmt"
-	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
-	"time"
-
-	"github.com/redis/go-redis/v9"
-	"github.com/vurakit/agentveil/internal/auth"
-	"github.com/vurakit/agentveil/internal/detector"
-	"github.com/vurakit/agentveil/internal/logging"
-	"github.com/vurakit/agentveil/internal/promptguard"
-	"github.com/vurakit/agentveil/internal/proxy"
-	"github.com/vurakit/agentveil/internal/ratelimit"
-	"github.com/vurakit/agentveil/internal/vault"
 )
 
+// P2 #17: Consolidated — delegates to the main proxy binary instead of
+// duplicating the entire bootstrap logic from cmd/proxy/main.go.
 func handleProxy(args []string) {
 	if len(args) == 0 || args[0] != "start" {
 		fmt.Println("Usage: agentveil proxy start")
 		return
 	}
 
-	logger := logging.Setup(envOr("LOG_LEVEL", "info"), os.Stdout)
-	logger.Info("starting Agent Veil proxy", "version", version)
-
-	targetURL := envOr("TARGET_URL", "https://api.openai.com")
-	listenAddr := envOr("LISTEN_ADDR", ":8080")
-	redisAddr := envOr("REDIS_ADDR", "localhost:6379")
-	redisPassword := envOr("REDIS_PASSWORD", "")
-	encryptionKey := envOr("VEIL_ENCRYPTION_KEY", "")
-
-	// Redis
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: redisPassword,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		logger.Warn("Redis not available", "error", err)
-	} else {
-		logger.Info("Redis connected", "addr", redisAddr)
-	}
-
-	// Vault
-	v := vault.NewWithClient(redisClient)
-	if encryptionKey != "" {
-		keyBytes, err := hex.DecodeString(encryptionKey)
-		if err != nil || len(keyBytes) != 32 {
-			logger.Error("VEIL_ENCRYPTION_KEY must be 64 hex chars")
-			os.Exit(1)
-		}
-		enc, err := vault.NewEncryptor(keyBytes)
-		if err != nil {
-			logger.Error("encryptor error", "error", err)
-			os.Exit(1)
-		}
-		v.SetEncryptor(enc)
-		logger.Info("vault encryption enabled")
-	}
-
-	// Components
-	det := detector.New()
-	authMgr := auth.NewManager(redisClient)
-	rl := ratelimit.New(ratelimit.DefaultConfig())
-	defer rl.Close()
-	pg := promptguard.New()
-
-	srv, err := proxy.New(
-		proxy.Config{TargetURL: targetURL},
-		det, v,
-		proxy.WithAuth(authMgr),
-		proxy.WithPromptGuard(pg),
-	)
-	if err != nil {
-		logger.Error("proxy create error", "error", err)
+	// Find the proxy binary
+	proxyBin := findProxyBinary()
+	if proxyBin == "" {
+		fmt.Fprintln(os.Stderr, "Error: agentveil-proxy binary not found.")
+		fmt.Fprintln(os.Stderr, "Build it: go build -o ~/.agentveil/bin/agentveil-proxy ./cmd/proxy/")
 		os.Exit(1)
 	}
 
-	handler := rl.Middleware(srv.Handler())
+	fmt.Fprintf(os.Stderr, "🛡️  Starting Agent Veil proxy via %s\n", proxyBin)
 
-	httpServer := &http.Server{
-		Addr:         listenAddr,
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 600 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	cmd := exec.Command(proxyBin)
+	cmd.Env = os.Environ()
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting proxy: %v\n", err)
+		os.Exit(1)
 	}
 
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
-
+	// Forward signals to child
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		logger.Info("proxy listening", "addr", listenAddr, "target", targetURL)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("server error", "error", err)
-			os.Exit(1)
-		}
+		sig := <-sigs
+		cmd.Process.Signal(sig)
 	}()
 
-	<-done
-	logger.Info("shutting down...")
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "Proxy error: %v\n", err)
+		os.Exit(1)
+	}
+}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	httpServer.Shutdown(shutdownCtx)
-	redisClient.Close()
-	logger.Info("stopped")
+func findProxyBinary() string {
+	// Check common locations
+	candidates := []string{
+		os.ExpandEnv("$HOME/.agentveil/bin/agentveil-proxy"),
+		"./agentveil-proxy",
+	}
+
+	// Also check if it's in PATH
+	if path, err := exec.LookPath("agentveil-proxy"); err == nil {
+		return path
+	}
+
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
 }
 
 func envOr(key, fallback string) string {

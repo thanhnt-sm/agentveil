@@ -154,6 +154,17 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 	rehydrated := s.rehydrateText(string(body), sessionID, role)
 
+	// P1 #6: Scan output for harmful content / data leaks
+	if s.promptGuard != nil {
+		result := s.promptGuard.ScanOutput(rehydrated)
+		if len(result.Detections) > 0 {
+			slog.Warn("output scan detected issues",
+				"threat_level", result.ThreatLevel.String(),
+				"detections", len(result.Detections),
+				"session", sessionID)
+		}
+	}
+
 	resp.Body = io.NopCloser(bytes.NewBufferString(rehydrated))
 	resp.ContentLength = int64(len(rehydrated))
 

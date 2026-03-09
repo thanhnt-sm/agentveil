@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -140,6 +142,9 @@ func main() {
 		mux.HandleFunc("/health", healthHandler)
 		mux.HandleFunc("/healthz", healthHandler)
 
+		// N8: Prometheus metrics endpoint
+		mux.HandleFunc("/metrics", proxy.MetricsHandler())
+
 		// Expose /scan and /audit without auth (same as single-target mode)
 		mux.HandleFunc("/scan", proxy.HandleScan(det))
 		mux.HandleFunc("/audit", proxy.HandleAudit())
@@ -159,7 +164,11 @@ func main() {
 		}
 		mux.Handle("/", routerHandler)
 
-		handler = rl.Middleware(mux)
+		// N11: Request tracing + N8: Metrics tracking
+		handler = proxy.RequestTracingMiddleware(rl.Middleware(mux))
+
+		// N12: Config hot-reload watcher
+		go watchConfigReload(routerConfig, rt, det, v, dispatcher, defaultRole, logger)
 
 		logger.Info("router mode enabled", "config", routerConfig, "providers", rt.GetProviders())
 	} else {
@@ -236,3 +245,48 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
+
+// N12: Config hot-reload — watches router.yaml for mtime changes
+func watchConfigReload(configPath string, rt *router.Router, det *detector.Detector, v *vault.Vault, wh *webhook.Dispatcher, defaultRole string, logger *slog.Logger) {
+	absPath, _ := filepath.Abs(configPath)
+	var lastMod time.Time
+	if info, err := os.Stat(absPath); err == nil {
+		lastMod = info.ModTime()
+	}
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		info, err := os.Stat(absPath)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Equal(lastMod) {
+			continue
+		}
+		lastMod = info.ModTime()
+
+		logger.Info("config change detected, reloading", "path", absPath)
+		cfg, err := router.LoadConfig(configPath)
+		if err != nil {
+			logger.Error("reload failed: invalid config", "error", err)
+			continue
+		}
+
+		newRt, err := router.New(cfg)
+		if err != nil {
+			logger.Error("reload failed: router init", "error", err)
+			continue
+		}
+
+		// Re-wire PII handlers
+		newRt.SetRequestModifier(proxy.AnonymizeRequest(det, v, wh))
+		newRt.SetResponseModifier(proxy.RehydrateResponse(v, defaultRole))
+
+		// Swap routes in existing router
+		rt.HotSwap(newRt)
+		logger.Info("config reloaded successfully", "providers", newRt.GetProviders())
+	}
+}
+

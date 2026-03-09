@@ -11,6 +11,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const defaultKeyTTL = 90 * 24 * time.Hour // P2 #12: 90-day TTL on API keys
+
 // Role determines the user's access level
 type Role string
 
@@ -76,6 +78,13 @@ func (m *Manager) GenerateKey(ctx context.Context, role Role, label string) (str
 		return "", nil, fmt.Errorf("store key: %w", err)
 	}
 
+	// P2 #12: Set TTL on API keys
+	m.client.Expire(ctx, redisKey, defaultKeyTTL)
+
+	// P2 #11: Secondary index for O(1) RevokeByID
+	idxKey := "auth:id2key:" + key.ID
+	m.client.Set(ctx, idxKey, hash, defaultKeyTTL)
+
 	return plaintext, key, nil
 }
 
@@ -114,13 +123,22 @@ func (m *Manager) Revoke(ctx context.Context, plaintext string) error {
 	return m.client.HSet(ctx, redisKey, "active", "false").Err()
 }
 
-// RevokeByID deactivates an API key by its ID (searches all keys)
+// RevokeByID deactivates an API key by its ID using the secondary index
 func (m *Manager) RevokeByID(ctx context.Context, id string) error {
+	// P2 #11: Use secondary index for O(1) lookup
+	idxKey := "auth:id2key:" + id
+	hash, err := m.client.Get(ctx, idxKey).Result()
+	if err == nil && hash != "" {
+		redisKey := m.prefix + hash
+		return m.client.HSet(ctx, redisKey, "active", "false").Err()
+	}
+
+	// Fallback: scan (backwards compat for keys created before index)
 	var cursor uint64
 	for {
-		keys, nextCursor, err := m.client.Scan(ctx, cursor, m.prefix+"*", 100).Result()
-		if err != nil {
-			return err
+		keys, nextCursor, scanErr := m.client.Scan(ctx, cursor, m.prefix+"*", 100).Result()
+		if scanErr != nil {
+			return scanErr
 		}
 		for _, key := range keys {
 			storedID, _ := m.client.HGet(ctx, key, "id").Result()
