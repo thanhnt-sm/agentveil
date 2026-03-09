@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/vurakit/agentveil/internal/auth"
 	"github.com/vurakit/agentveil/internal/detector"
@@ -173,7 +174,9 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 // rehydrateText replaces pseudonym tokens with real values, applying role masking
 func (s *Server) rehydrateText(text, sessionID, role string) string {
-	mappings, err := s.vault.LookupAll(context.Background(), sessionID)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	mappings, err := s.vault.LookupAll(ctx, sessionID)
 	if err != nil || len(mappings) == 0 {
 		return text
 	}
@@ -286,7 +289,9 @@ func RehydrateResponse(v *vault.Vault, defaultRole string) func(*http.Response) 
 		}
 		resp.Body.Close()
 
-		mappings, err := v.LookupAll(context.Background(), sessionID)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		mappings, err := v.LookupAll(ctx, sessionID)
 		if err != nil || len(mappings) == 0 {
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 			return nil

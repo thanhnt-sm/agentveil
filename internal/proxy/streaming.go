@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/vurakit/agentveil/internal/vault"
 )
@@ -45,7 +46,9 @@ func (s *sseRehydrator) Read(p []byte) (int, error) {
 
 	// Lazy-load mappings on first read
 	if !s.loaded {
-		mappings, err := s.vault.LookupAll(context.Background(), s.sessionID)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		mappings, err := s.vault.LookupAll(ctx, s.sessionID)
+		cancel()
 		if err != nil {
 			slog.Warn("failed to load vault mappings for SSE", "error", err, "session", s.sessionID)
 		}
