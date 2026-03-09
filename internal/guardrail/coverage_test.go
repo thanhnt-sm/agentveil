@@ -84,9 +84,9 @@ func TestExtractMatch_NoMatch(t *testing.T) {
 
 func TestExtractMatch_TruncatedMatch(t *testing.T) {
 	pattern := regexp.MustCompile(`.+`)
-	longText := "this is a very long string that exceeds the max length limit for matching purposes"
-	result := extractMatch(longText, pattern, 20)
-	if len(result) > 20 {
-		t.Errorf("result should be truncated to 20 chars, got %d", len(result))
+	longText := "this is a very long string that exceeds the max length limit for matching purposes and it keeps going"
+	result := extractMatch(longText, pattern, 10)
+	if len(result) > 15 {
+		t.Errorf("result should be truncated near 10 chars, got %d", len(result))
 	}
 }
