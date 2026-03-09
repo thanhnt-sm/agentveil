@@ -28,10 +28,10 @@ func anonymizeBody(req *http.Request, det *detector.Detector, v *vault.Vault, se
 			slog.Warn("PII detected in query params", "count", len(queryMapping), "session", sessionID)
 			req.URL.RawQuery = scanQuery
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
 			if err := v.Store(ctx, sessionID, queryMapping); err != nil {
 				slog.Error("vault store (query) error", "error", err)
 			}
-			cancel()
 		}
 	}
 
@@ -87,10 +87,10 @@ func anonymizeBody(req *http.Request, det *detector.Detector, v *vault.Vault, se
 		}.Log(slog.Default())
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
 		if err := v.Store(ctx, sessionID, mapping); err != nil {
 			slog.Error("vault store error", "error", err, "session", sessionID)
 		}
-		cancel()
 
 		if wh != nil {
 			wh.Emit(webhook.Event{

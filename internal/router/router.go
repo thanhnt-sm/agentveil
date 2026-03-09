@@ -295,11 +295,18 @@ func (r *Router) serveWithFallback(w http.ResponseWriter, req *http.Request, pri
 		attempts = len(order)
 	}
 
-	// P1 #7: Save request body for retries
+	// P1 #7: Save request body for retries (bounded to 10MB to prevent OOM)
 	var savedBody []byte
 	if req.Body != nil {
-		savedBody, _ = io.ReadAll(req.Body)
+		limited := io.LimitReader(req.Body, 10*1024*1024+1)
+		savedBody, _ = io.ReadAll(limited)
 		req.Body.Close()
+		if int64(len(savedBody)) > 10*1024*1024 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			w.Write([]byte(`{"error":"body_too_large"}`))
+			return
+		}
 		req.Body = io.NopCloser(bytes.NewReader(savedBody))
 	}
 
@@ -349,7 +356,14 @@ func (r *Router) serveWithFallback(w http.ResponseWriter, req *http.Request, pri
 		req.URL.Path = originalPath
 
 		if i < attempts-1 && r.fallback.RetryDelaySec > 0 {
-			time.Sleep(time.Duration(r.fallback.RetryDelaySec) * time.Second)
+			select {
+			case <-req.Context().Done():
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusGatewayTimeout)
+				w.Write([]byte(`{"error":"client_cancelled"}`))
+				return
+			case <-time.After(time.Duration(r.fallback.RetryDelaySec) * time.Second):
+			}
 		}
 	}
 

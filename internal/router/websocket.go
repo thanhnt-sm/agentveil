@@ -132,7 +132,7 @@ func (wsp *WebSocketProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, tar
 		if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
 			io.CopyN(upstreamConn, clientBuf, int64(clientBuf.Reader.Buffered()))
 		}
-		wsCopy(upstreamConn, clientConn, wsp.config.ReadTimeout)
+		wsCopy(upstreamConn, clientConn, wsp.config.ReadTimeout, wsp.config.WriteTimeout)
 	}()
 
 	// Upstream → Client
@@ -142,7 +142,7 @@ func (wsp *WebSocketProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, tar
 		if upstreamBuf.Buffered() > 0 {
 			io.CopyN(clientConn, upstreamBuf, int64(upstreamBuf.Buffered()))
 		}
-		wsCopy(clientConn, upstreamConn, wsp.config.ReadTimeout)
+		wsCopy(clientConn, upstreamConn, wsp.config.ReadTimeout, wsp.config.WriteTimeout)
 	}()
 
 	// Wait for either direction to close
@@ -199,14 +199,14 @@ func buildUpgradeRequest(original *http.Request, target *url.URL) *http.Request 
 	return req
 }
 
-// wsCopy copies data between connections with a timeout
-func wsCopy(dst net.Conn, src net.Conn, timeout time.Duration) {
+// wsCopy copies data between connections with configurable timeouts
+func wsCopy(dst net.Conn, src net.Conn, readTimeout, writeTimeout time.Duration) {
 	buf := make([]byte, 32*1024)
 	for {
-		src.SetReadDeadline(time.Now().Add(timeout))
+		src.SetReadDeadline(time.Now().Add(readTimeout))
 		n, err := src.Read(buf)
 		if n > 0 {
-			dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			dst.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if _, wErr := dst.Write(buf[:n]); wErr != nil {
 				return
 			}

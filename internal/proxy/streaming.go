@@ -19,6 +19,7 @@ type sseRehydrator struct {
 	vault     *vault.Vault
 	sessionID string
 	mappings  map[string]string
+	replacer  *strings.Replacer // BUG-04 FIX: O(N+M) Aho-Corasick
 	loaded    bool
 	buf       *bytes.Buffer
 	done      bool
@@ -53,6 +54,14 @@ func (s *sseRehydrator) Read(p []byte) (int, error) {
 			slog.Warn("failed to load vault mappings for SSE", "error", err, "session", s.sessionID)
 		}
 		s.mappings = mappings
+		// BUG-04 FIX: build Aho-Corasick replacer once
+		if len(mappings) > 0 {
+			pairs := make([]string, 0, len(mappings)*2)
+			for token, original := range mappings {
+				pairs = append(pairs, token, original)
+			}
+			s.replacer = strings.NewReplacer(pairs...)
+		}
 		s.loaded = true
 	}
 
@@ -68,10 +77,8 @@ func (s *sseRehydrator) Read(p []byte) (int, error) {
 	line := s.reader.Text()
 
 	// Rehydrate any PII tokens found in this SSE line
-	if len(s.mappings) > 0 && strings.Contains(line, "[") {
-		for token, original := range s.mappings {
-			line = strings.ReplaceAll(line, token, original)
-		}
+	if s.replacer != nil && strings.Contains(line, "[") {
+		line = s.replacer.Replace(line)
 	}
 
 	// Write the processed line + newline to buffer

@@ -91,7 +91,12 @@ func ParseConfig(data string) (*RouterConfig, error) {
 		}
 		// Resolve $ENV_VAR references in api_key
 		if len(p.APIKey) > 0 && p.APIKey[0] == '$' {
-			p.APIKey = os.Getenv(p.APIKey[1:])
+			envName := p.APIKey[1:]
+			resolved := os.Getenv(envName)
+			if resolved == "" {
+				return nil, fmt.Errorf("provider %s: env var $%s is not set", p.Name, envName)
+			}
+			p.APIKey = resolved
 		}
 		if p.Weight == 0 {
 			p.Weight = 1
