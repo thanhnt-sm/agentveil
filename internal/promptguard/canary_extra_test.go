@@ -28,7 +28,7 @@ func TestContains(t *testing.T) {
 	}
 }
 
-func TestFindSubstring(t *testing.T) {
+func TestContainsSubstring(t *testing.T) {
 	tests := []struct {
 		s    string
 		sub  string
@@ -43,9 +43,9 @@ func TestFindSubstring(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := findSubstring(tt.s, tt.sub)
+		got := contains(tt.s, tt.sub)
 		if got != tt.want {
-			t.Errorf("findSubstring(%q, %q) = %v, want %v", tt.s, tt.sub, got, tt.want)
+			t.Errorf("contains(%q, %q) = %v, want %v", tt.s, tt.sub, got, tt.want)
 		}
 	}
 }

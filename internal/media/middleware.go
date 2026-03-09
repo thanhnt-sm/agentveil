@@ -46,8 +46,8 @@ func (sm *ScanMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read body for media scanning
-		body, err := io.ReadAll(r.Body)
+		// Read body for media scanning (bounded to 10MB)
+		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 		if err != nil {
 			next.ServeHTTP(w, r)
 			return

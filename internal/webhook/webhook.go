@@ -3,6 +3,7 @@ package webhook
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -132,7 +133,9 @@ func (d *Dispatcher) Emit(event Event) {
 		event.Timestamp = time.Now()
 	}
 	if event.ID == "" {
-		event.ID = fmt.Sprintf("evt_%d", time.Now().UnixNano())
+		b := make([]byte, 12)
+		rand.Read(b)
+		event.ID = "evt_" + hex.EncodeToString(b)
 	}
 
 	select {

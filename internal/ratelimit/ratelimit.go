@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -135,9 +136,12 @@ func (l *Limiter) cleanup() {
 }
 
 func extractIP(r *http.Request) string {
-	// Check X-Forwarded-For first (behind load balancer)
+	// Check X-Forwarded-For first (behind load balancer) — take first IP only
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
+		if idx := strings.Index(xff, ","); idx != -1 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
 	}
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return xri
