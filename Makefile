@@ -1,4 +1,4 @@
-.PHONY: build build-proxy build-cli test test-cover test-component lint fmt run docker-build docker-up docker-down clean install help
+.PHONY: build build-proxy build-cli test test-cover test-component lint fmt vet security check run docker-build docker-up docker-down clean install help
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -45,6 +45,25 @@ lint:
 fmt:
 	gofmt -w .
 	go mod tidy
+
+## vet: Run go vet
+vet:
+	go vet ./...
+
+## security: Run security audit checks
+security:
+	@echo "=== Security Audit ==="
+	@echo "Checking for math/rand in production..."
+	@if grep -rn 'math/rand' --include='*.go' | grep -v _test.go | grep -v vendor; then echo "FAIL: math/rand found"; exit 1; else echo "PASS"; fi
+	@echo "Checking for unbounded context.Background..."
+	@HITS=$$(grep -rn 'context.Background()' --include='*.go' | grep -v _test.go | grep -v 'WithTimeout\|WithCancel\|WithDeadline' | grep -v 'cmd/\|examples/\|sdk/' || true); \
+	 if [ -n "$$HITS" ]; then echo "WARNING:"; echo "$$HITS"; else echo "PASS"; fi
+	@echo "Running gosec..."
+	golangci-lint run --enable gosec --disable-all ./...
+	@echo "=== All checks passed ==="
+
+## check: Run all checks (vet + lint + security + test)
+check: vet lint security test
 
 ## run: Start proxy with default config (requires Redis)
 run: build-proxy

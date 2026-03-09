@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vurakit/agentveil/actions/workflows/ci.yml"><img src="https://github.com/vurakit/agentveil/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/thanhnt-sm/agentveil/actions/workflows/ci.yml"><img src="https://github.com/thanhnt-sm/agentveil/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.23-00ADD8?logo=go" alt="Go 1.23"></a>
 </p>
