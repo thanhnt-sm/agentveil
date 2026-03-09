@@ -79,32 +79,11 @@ func (wsp *WebSocketProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, tar
 	}
 	defer clientConn.Close()
 
-	// Determine upstream host:port
-	upstreamHost := targetURL.Host
-	useTLS := targetURL.Scheme == "https" || targetURL.Scheme == "wss"
-	if !strings.Contains(upstreamHost, ":") {
-		if useTLS {
-			upstreamHost += ":443"
-		} else {
-			upstreamHost += ":80"
-		}
-	}
 
 	// Connect to upstream
-	var upstreamConn net.Conn
-	if useTLS {
-		hostname := targetURL.Hostname()
-		upstreamConn, err = tls.DialWithDialer(
-			&net.Dialer{Timeout: 10 * time.Second},
-			"tcp",
-			upstreamHost,
-			&tls.Config{ServerName: hostname},
-		)
-	} else {
-		upstreamConn, err = net.DialTimeout("tcp", upstreamHost, 10*time.Second)
-	}
+	upstreamConn, err := dialUpstream(targetURL)
 	if err != nil {
-		slog.Error("websocket: upstream dial failed", "target", upstreamHost, "error", err)
+		slog.Error("websocket: upstream dial failed", "target", targetURL.Host, "error", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
@@ -169,6 +148,28 @@ func (wsp *WebSocketProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, tar
 	// Wait for either direction to close
 	<-done
 	slog.Info("websocket: connection closed", "path", r.URL.Path)
+}
+
+// dialUpstream establishes a TCP or TLS connection to the upstream WebSocket server
+func dialUpstream(target *url.URL) (net.Conn, error) {
+	host := target.Host
+	useTLS := target.Scheme == "https" || target.Scheme == "wss"
+	if !strings.Contains(host, ":") {
+		if useTLS {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+
+	if useTLS {
+		return tls.DialWithDialer(
+			&net.Dialer{Timeout: 10 * time.Second},
+			"tcp", host,
+			&tls.Config{ServerName: target.Hostname()},
+		)
+	}
+	return net.DialTimeout("tcp", host, 10*time.Second)
 }
 
 // buildUpgradeRequest constructs the HTTP upgrade request for upstream

@@ -66,75 +66,13 @@ func New(cfg *RouterConfig) (*Router, error) {
 		if !pc.Enabled {
 			continue
 		}
-		target, err := url.Parse(pc.BaseURL)
+		p, err := r.buildProvider(pc)
 		if err != nil {
-			return nil, fmt.Errorf("provider %s: invalid URL %s: %w", pc.Name, pc.BaseURL, err)
+			return nil, err
 		}
-
-		p := &Provider{
-			Config: pc,
-			Target: target,
-		}
-		p.healthy.Store(true)
-
-		// Create reverse proxy for this provider
-		p.Proxy = &httputil.ReverseProxy{
-			Director: func(req *http.Request) {
-				req.URL.Scheme = target.Scheme
-				req.URL.Host = target.Host
-				req.Host = target.Host
-
-				// Prepend target base path if present
-				// e.g. base_url=https://api.example.com/api → /chat becomes /api/chat
-				if target.Path != "" && target.Path != "/" {
-					req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-				}
-
-				// Set provider API key if configured
-				// "passthrough" = keep client's original auth header (e.g. Codex IDE login token)
-				if pc.AuthMethod != "passthrough" && pc.APIKey != "" {
-					switch pc.AuthMethod {
-					case "query":
-						q := req.URL.Query()
-						q.Set(pc.AuthParam, pc.APIKey)
-						req.URL.RawQuery = q.Encode()
-					case "x-api-key":
-						req.Header.Set("x-api-key", pc.APIKey)
-					default: // "header" — Bearer token
-						req.Header.Set("Authorization", "Bearer "+pc.APIKey)
-					}
-				}
-
-				// Apply custom request modifier (PII anonymization)
-				if r.requestModifier != nil {
-					slog.Debug("applying request modifier", "provider", pc.Name, "path", req.URL.Path)
-					r.requestModifier(req)
-				}
-			},
-			ModifyResponse: func(resp *http.Response) error {
-				if r.responseModifier != nil {
-					return r.responseModifier(resp)
-				}
-				return nil
-			},
-			ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-				slog.Warn("provider error", "provider", pc.Name, "error", err)
-				p.healthy.Store(false)
-				// Schedule health recovery
-				go func() {
-					time.Sleep(30 * time.Second)
-					p.healthy.Store(true)
-					slog.Info("provider health restored", "provider", pc.Name)
-				}()
-				http.Error(w, fmt.Sprintf(`{"error":"provider_error","provider":"%s"}`, pc.Name), http.StatusBadGateway)
-			},
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: time.Duration(pc.TimeoutSec) * time.Second,
-			},
-		}
-
 		r.providers[pc.Name] = p
 	}
+
 
 	if len(r.providers) == 0 {
 		return nil, fmt.Errorf("no enabled providers")
@@ -182,6 +120,68 @@ func New(cfg *RouterConfig) (*Router, error) {
 	}
 
 	return r, nil
+}
+
+// buildProvider creates a Provider with its reverse proxy from a ProviderConfig
+func (r *Router) buildProvider(pc ProviderConfig) (*Provider, error) {
+	target, err := url.Parse(pc.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("provider %s: invalid URL %s: %w", pc.Name, pc.BaseURL, err)
+	}
+
+	p := &Provider{Config: pc, Target: target}
+	p.healthy.Store(true)
+
+	p.Proxy = &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.Host = target.Host
+
+			if target.Path != "" && target.Path != "/" {
+				req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+			}
+
+			if pc.AuthMethod != "passthrough" && pc.APIKey != "" {
+				switch pc.AuthMethod {
+				case "query":
+					q := req.URL.Query()
+					q.Set(pc.AuthParam, pc.APIKey)
+					req.URL.RawQuery = q.Encode()
+				case "x-api-key":
+					req.Header.Set("x-api-key", pc.APIKey)
+				default:
+					req.Header.Set("Authorization", "Bearer "+pc.APIKey)
+				}
+			}
+
+			if r.requestModifier != nil {
+				slog.Debug("applying request modifier", "provider", pc.Name, "path", req.URL.Path)
+				r.requestModifier(req)
+			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if r.responseModifier != nil {
+				return r.responseModifier(resp)
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			slog.Warn("provider error", "provider", pc.Name, "error", err)
+			p.healthy.Store(false)
+			go func() {
+				time.Sleep(30 * time.Second)
+				p.healthy.Store(true)
+				slog.Info("provider health restored", "provider", pc.Name)
+			}()
+			http.Error(w, fmt.Sprintf(`{"error":"provider_error","provider":"%s"}`, pc.Name), http.StatusBadGateway)
+		},
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: time.Duration(pc.TimeoutSec) * time.Second,
+		},
+	}
+
+	return p, nil
 }
 
 // SetRequestModifier sets a function that modifies requests before forwarding
