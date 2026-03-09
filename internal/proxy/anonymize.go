@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/vurakit/agentveil/internal/detector"
 	"github.com/vurakit/agentveil/internal/logging"
@@ -26,9 +27,11 @@ func anonymizeBody(req *http.Request, det *detector.Detector, v *vault.Vault, se
 		if len(queryMapping) > 0 {
 			slog.Warn("PII detected in query params", "count", len(queryMapping), "session", sessionID)
 			req.URL.RawQuery = scanQuery
-			if err := v.Store(context.Background(), sessionID, queryMapping); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := v.Store(ctx, sessionID, queryMapping); err != nil {
 				slog.Error("vault store (query) error", "error", err)
 			}
+			cancel()
 		}
 	}
 
@@ -83,9 +86,11 @@ func anonymizeBody(req *http.Request, det *detector.Detector, v *vault.Vault, se
 			Path:       req.URL.Path,
 		}.Log(slog.Default())
 
-		if err := v.Store(context.Background(), sessionID, mapping); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := v.Store(ctx, sessionID, mapping); err != nil {
 			slog.Error("vault store error", "error", err, "session", sessionID)
 		}
+		cancel()
 
 		if wh != nil {
 			wh.Emit(webhook.Event{

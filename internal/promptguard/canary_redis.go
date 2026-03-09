@@ -12,6 +12,7 @@ import (
 const (
 	canaryRedisPrefix = "canary:"
 	canaryTTL         = 24 * time.Hour
+	canaryCtxTimeout  = 3 * time.Second
 )
 
 // RedisCanaryStore is a Redis-backed CanaryStore that persists across restarts.
@@ -33,8 +34,8 @@ func NewRedisCanaryStore(client *redis.Client) *RedisCanaryStore {
 func (rcs *RedisCanaryStore) Generate(sessionID string) CanaryToken {
 	canary := rcs.mem.Generate(sessionID)
 
-	// Persist to Redis
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), canaryCtxTimeout)
+	defer cancel()
 	data, _ := json.Marshal(canary)
 	rcs.client.Set(ctx, canaryRedisPrefix+canary.Token, data, canaryTTL)
 
@@ -45,8 +46,8 @@ func (rcs *RedisCanaryStore) Generate(sessionID string) CanaryToken {
 func (rcs *RedisCanaryStore) InjectCanary(text, sessionID string) (string, CanaryToken) {
 	injected, canary := rcs.mem.InjectCanary(text, sessionID)
 
-	// Persist to Redis
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), canaryCtxTimeout)
+	defer cancel()
 	data, _ := json.Marshal(canary)
 	rcs.client.Set(ctx, canaryRedisPrefix+canary.Token, data, canaryTTL)
 
@@ -62,7 +63,8 @@ func (rcs *RedisCanaryStore) CheckLeaked(text string) []CanaryToken {
 	}
 
 	// Slow path: scan Redis for any canary tokens in the text
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), canaryCtxTimeout)
+	defer cancel()
 	var cursor uint64
 	for {
 		keys, nextCursor, err := rcs.client.Scan(ctx, cursor, canaryRedisPrefix+"*", 100).Result()
@@ -93,13 +95,16 @@ func (rcs *RedisCanaryStore) CheckLeaked(text string) []CanaryToken {
 // Remove deletes a canary token from both memory and Redis.
 func (rcs *RedisCanaryStore) Remove(token string) {
 	rcs.mem.Remove(token)
-	rcs.client.Del(context.Background(), canaryRedisPrefix+token)
+	ctx, cancel := context.WithTimeout(context.Background(), canaryCtxTimeout)
+	defer cancel()
+	rcs.client.Del(ctx, canaryRedisPrefix+token)
 }
 
 // LoadFromRedis loads all existing canary tokens from Redis into memory.
 // Call this on startup to restore state after a restart.
 func (rcs *RedisCanaryStore) LoadFromRedis() (int, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var cursor uint64
 	loaded := 0
 

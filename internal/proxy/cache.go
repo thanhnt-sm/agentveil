@@ -75,7 +75,10 @@ func CacheKey(body []byte) string {
 		return ""
 	}
 
-	keyData, _ := json.Marshal(parts)
+	keyData, err := json.Marshal(parts)
+	if err != nil {
+		return ""
+	}
 	hash := sha256.Sum256(keyData)
 	return cachePrefix + hex.EncodeToString(hash[:16]) // 128-bit key
 }
