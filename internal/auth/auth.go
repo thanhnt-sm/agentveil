@@ -98,10 +98,10 @@ func (m *Manager) Validate(ctx context.Context, plaintext string) (*APIKey, erro
 		return nil, fmt.Errorf("lookup key: %w", err)
 	}
 	if len(data) == 0 {
-		return nil, fmt.Errorf("invalid API key")
+		return nil, fmt.Errorf("invalid or revoked API key")
 	}
 	if data["active"] != "true" {
-		return nil, fmt.Errorf("API key is revoked")
+		return nil, fmt.Errorf("invalid or revoked API key")
 	}
 
 	createdAt, _ := time.Parse(time.RFC3339, data["created_at"])

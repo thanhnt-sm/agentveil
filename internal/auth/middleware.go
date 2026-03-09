@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -31,7 +31,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(token, "veil_sk_") {
 			apiKey, err := m.Validate(r.Context(), token)
 			if err != nil {
-				log.Printf("[auth] rejected key: %v", err)
+				slog.Warn("auth: rejected key", "error", err)
 				http.Error(w, `{"error":"unauthorized","message":"invalid or revoked API key"}`, http.StatusUnauthorized)
 				return
 			}
@@ -40,7 +40,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			r.Header.Set("X-User-Role", string(apiKey.Role))
 			r.Header.Set("X-Veil-Key-ID", apiKey.ID)
 
-			log.Printf("[auth] authenticated key=%s role=%s", apiKey.ID, apiKey.Role)
+			slog.Info("auth: authenticated", "key_id", apiKey.ID, "role", apiKey.Role)
 		}
 
 		// Non-veil keys (e.g. sk-xxx for OpenAI) pass through

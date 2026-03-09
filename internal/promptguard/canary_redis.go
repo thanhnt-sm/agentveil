@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -136,14 +137,5 @@ func (rcs *RedisCanaryStore) LoadFromRedis() (int, error) {
 }
 
 func contains(text, token string) bool {
-	return len(token) > 0 && len(text) >= len(token) && (text == token || findSubstring(text, token))
-}
-
-func findSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return len(token) > 0 && strings.Contains(text, token)
 }

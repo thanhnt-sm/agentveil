@@ -87,9 +87,9 @@ func extractTextFromBody(body []byte) string {
 			if !ok {
 				continue
 			}
-			// Only scan user messages (not system/assistant)
+			// Scan user, tool, and function messages (indirect injection via tool results)
 			role, _ := m["role"].(string)
-			if role != "user" {
+			if role != "user" && role != "tool" && role != "function" {
 				continue
 			}
 
