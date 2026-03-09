@@ -1,9 +1,11 @@
 package router
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"log/slog"
 	"math"
-	"math/rand"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -39,7 +41,6 @@ func NewProviderHealth() *ProviderHealth {
 // RecordSuccess records a successful request
 func (ph *ProviderHealth) RecordSuccess() {
 	ph.requestCount.Add(1)
-	// If circuit is open and recovery time passed, close it (half-open → closed)
 	if ph.circuitOpen.Load() {
 		ph.mu.Lock()
 		if time.Since(ph.circuitOpenAt) > ph.RecoveryTime {
@@ -70,7 +71,6 @@ func (ph *ProviderHealth) IsAvailable() bool {
 	if !ph.circuitOpen.Load() {
 		return true
 	}
-	// Allow one probe request after recovery time (half-open state)
 	ph.mu.Lock()
 	defer ph.mu.Unlock()
 	if time.Since(ph.circuitOpenAt) > ph.RecoveryTime {
@@ -89,7 +89,7 @@ func (ph *ProviderHealth) ResetAfterWindow() {
 }
 
 // StartHealthProbe starts periodic health checking for a provider
-// N4: Active health probes against provider base URL
+// N4: Active health probes with context timeout
 func StartHealthProbe(name string, baseURL string, provider *Provider, interval time.Duration) func() {
 	done := make(chan struct{})
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -100,7 +100,15 @@ func StartHealthProbe(name string, baseURL string, provider *Provider, interval 
 		for {
 			select {
 			case <-ticker.C:
-				resp, err := client.Get(baseURL + "/health")
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/health", nil)
+				if err != nil {
+					cancel()
+					provider.healthy.Store(false)
+					continue
+				}
+				resp, err := client.Do(req)
+				cancel()
 				if err != nil {
 					provider.healthy.Store(false)
 					slog.Debug("health probe failed", "provider", name, "error", err)
@@ -121,23 +129,38 @@ func StartHealthProbe(name string, baseURL string, provider *Provider, interval 
 	return func() { close(done) }
 }
 
+// cryptoRandInt64n returns a cryptographically secure random int64 in [0, n)
+func cryptoRandInt64n(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	v := int64(binary.LittleEndian.Uint64(b[:]) >> 1) // positive
+	return v % n
+}
+
 // N7: Exponential backoff with jitter for fallback retry
+// Uses crypto/rand for unpredictable jitter (security best practice)
 func backoffDelay(attempt int, baseDelay time.Duration) time.Duration {
 	if baseDelay == 0 {
 		baseDelay = 500 * time.Millisecond
 	}
-	// Exponential: base * 2^attempt
 	delay := baseDelay * time.Duration(math.Pow(2, float64(attempt)))
-	// Cap at 10 seconds
 	if delay > 10*time.Second {
 		delay = 10 * time.Second
 	}
-	// Add jitter: ±25%
-	jitter := time.Duration(rand.Int63n(int64(delay) / 4))
-	if rand.Intn(2) == 0 {
-		delay += jitter
-	} else {
-		delay -= jitter
+	// ±25% jitter using crypto/rand
+	quarter := int64(delay) / 4
+	if quarter > 0 {
+		jitter := time.Duration(cryptoRandInt64n(quarter))
+		if cryptoRandInt64n(2) == 0 {
+			delay += jitter
+		} else {
+			delay -= jitter
+		}
 	}
 	return delay
 }
