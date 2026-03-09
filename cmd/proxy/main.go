@@ -29,34 +29,92 @@ func main() {
 	logger.Info("starting Agent Veil")
 
 	// Configuration
-	targetURL := envOr("TARGET_URL", "https://api.openai.com")
-	listenAddr := envOr("LISTEN_ADDR", ":8080")
-	redisAddr := envOr("REDIS_ADDR", "localhost:6379")
-	redisPassword := envOr("REDIS_PASSWORD", "")
-	encryptionKey := envOr("VEIL_ENCRYPTION_KEY", "") // 64 hex chars = 32 bytes
-	defaultRole := envOr("VEIL_DEFAULT_ROLE", "viewer")
-	tlsCert := envOr("TLS_CERT", "")
-	tlsKey := envOr("TLS_KEY", "")
+	cfg := loadConfig()
 
-	// Redis client (shared between vault and auth)
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: redisPassword,
+	// Infrastructure
+	redisClient := connectRedis(cfg.redisAddr, cfg.redisPassword, logger)
+	v := setupVault(redisClient, cfg.encryptionKey, cfg.vaultTTL, logger)
+	det := detector.New()
+	authMgr := auth.NewManager(redisClient)
+	rl := ratelimit.New(ratelimit.DefaultConfig())
+	defer rl.Close()
+	dispatcher := setupWebhooks(cfg.discordURL, cfg.slackURL, logger)
+	if dispatcher != nil {
+		defer dispatcher.Close()
+	}
+
+	// Build handler
+	handler := buildHandler(cfg, det, v, authMgr, rl, dispatcher, logger)
+
+	// Start server
+	httpServer := &http.Server{
+		Addr:         cfg.listenAddr,
+		Handler:      handler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 600 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	gracefulShutdown(httpServer, redisClient, cfg, logger)
+}
+
+// appConfig holds all configuration values read from environment
+type appConfig struct {
+	targetURL     string
+	listenAddr    string
+	redisAddr     string
+	redisPassword string
+	encryptionKey string
+	defaultRole   string
+	tlsCert       string
+	tlsKey        string
+	routerConfig  string
+	vaultTTL      string
+	discordURL    string
+	slackURL      string
+}
+
+// loadConfig reads all environment variables into a typed struct
+func loadConfig() appConfig {
+	return appConfig{
+		targetURL:     envOr("TARGET_URL", "https://api.openai.com"),
+		listenAddr:    envOr("LISTEN_ADDR", ":8080"),
+		redisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
+		redisPassword: envOr("REDIS_PASSWORD", ""),
+		encryptionKey: envOr("VEIL_ENCRYPTION_KEY", ""),
+		defaultRole:   envOr("VEIL_DEFAULT_ROLE", "viewer"),
+		tlsCert:       envOr("TLS_CERT", ""),
+		tlsKey:        envOr("TLS_KEY", ""),
+		routerConfig:  envOr("VEIL_ROUTER_CONFIG", ""),
+		vaultTTL:      envOr("VEIL_VAULT_TTL", ""),
+		discordURL:    envOr("VEIL_DISCORD_WEBHOOK_URL", ""),
+		slackURL:      envOr("VEIL_SLACK_WEBHOOK_URL", ""),
+	}
+}
+
+// connectRedis creates a Redis client and tests the connection
+func connectRedis(addr, password string, logger *slog.Logger) *redis.Client {
+	client := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	if err := client.Ping(ctx).Err(); err != nil {
 		logger.Warn("Redis not available, running without persistence", "error", err)
 	} else {
-		logger.Info("Redis connected", "addr", redisAddr)
+		logger.Info("Redis connected", "addr", addr)
 	}
 
-	// Vault
+	return client
+}
+
+// setupVault creates a vault with optional encryption and TTL configuration
+func setupVault(redisClient *redis.Client, encryptionKey, vaultTTL string, logger *slog.Logger) *vault.Vault {
 	v := vault.NewWithClient(redisClient)
 
-	// P3 #18: Configurable vault TTL
-	if vaultTTL := envOr("VEIL_VAULT_TTL", ""); vaultTTL != "" {
+	if vaultTTL != "" {
 		if d, err := time.ParseDuration(vaultTTL); err == nil {
 			v.SetTTL(d)
 			logger.Info("vault TTL configured", "ttl", d)
@@ -77,141 +135,120 @@ func main() {
 		v.SetEncryptor(enc)
 		logger.Info("vault encryption enabled (AES-256-GCM)")
 	} else {
-		// P0 #2: Loud warning when PII will be stored unencrypted
 		logger.Warn("⚠️  VEIL_ENCRYPTION_KEY not set — PII stored UNENCRYPTED in Redis!")
 		logger.Warn("⚠️  Set VEIL_ENCRYPTION_KEY for production use")
 	}
 
-	// Detector
-	det := detector.New()
+	return v
+}
 
-	// Auth manager
-	authMgr := auth.NewManager(redisClient)
-
-	// Rate limiter
-	rl := ratelimit.New(ratelimit.DefaultConfig())
-	defer rl.Close()
-
-	// Webhook dispatcher
-	var dispatcher *webhook.Dispatcher
-	discordURL := envOr("VEIL_DISCORD_WEBHOOK_URL", "")
-	slackURL := envOr("VEIL_SLACK_WEBHOOK_URL", "")
-	if discordURL != "" || slackURL != "" {
-		whCfg := webhook.DefaultConfig()
-		if discordURL != "" {
-			whCfg.Discord = &webhook.DiscordConfig{WebhookURL: discordURL}
-			logger.Info("discord webhook enabled")
-		}
-		if slackURL != "" {
-			whCfg.Slack = &webhook.SlackConfig{WebhookURL: slackURL}
-			logger.Info("slack webhook enabled")
-		}
-		dispatcher = webhook.NewDispatcher(whCfg)
-		defer dispatcher.Close()
+// setupWebhooks creates a webhook dispatcher if Discord or Slack URLs are configured
+func setupWebhooks(discordURL, slackURL string, logger *slog.Logger) *webhook.Dispatcher {
+	if discordURL == "" && slackURL == "" {
+		return nil
 	}
 
-	// Build handler: router mode or single-target mode
-	routerConfig := envOr("VEIL_ROUTER_CONFIG", "")
+	whCfg := webhook.DefaultConfig()
+	if discordURL != "" {
+		whCfg.Discord = &webhook.DiscordConfig{WebhookURL: discordURL}
+		logger.Info("discord webhook enabled")
+	}
+	if slackURL != "" {
+		whCfg.Slack = &webhook.SlackConfig{WebhookURL: slackURL}
+		logger.Info("slack webhook enabled")
+	}
+	return webhook.NewDispatcher(whCfg)
+}
 
-	var handler http.Handler
+// buildHandler creates the HTTP handler based on configuration mode (router or single-target)
+func buildHandler(cfg appConfig, det *detector.Detector, v *vault.Vault, authMgr *auth.Manager, rl *ratelimit.Limiter, dispatcher *webhook.Dispatcher, logger *slog.Logger) http.Handler {
+	if cfg.routerConfig != "" {
+		return buildRouterHandler(cfg, det, v, authMgr, rl, dispatcher, logger)
+	}
+	return buildProxyHandler(cfg, det, v, authMgr, rl, dispatcher, logger)
+}
 
-	if routerConfig != "" {
-		// Multi-provider router mode
-		cfg, err := router.LoadConfig(routerConfig)
-		if err != nil {
-			logger.Error("failed to load router config", "path", routerConfig, "error", err)
-			os.Exit(1)
-		}
-
-		rt, err := router.New(cfg)
-		if err != nil {
-			logger.Error("failed to create router", "error", err)
-			os.Exit(1)
-		}
-
-		// Wire PII anonymization into the router
-		rt.SetRequestModifier(proxy.AnonymizeRequest(det, v, dispatcher))
-		rt.SetResponseModifier(proxy.RehydrateResponse(v, defaultRole))
-
-		// Build mux with utility endpoints + router as catch-all
-		mux := http.NewServeMux()
-		healthHandler := func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"status":"ok"}`))
-		}
-		mux.HandleFunc("/health", healthHandler)
-		mux.HandleFunc("/healthz", healthHandler)
-
-		// N8: Prometheus metrics endpoint
-		mux.HandleFunc("/metrics", proxy.MetricsHandler())
-
-		// Expose /scan and /audit without auth (same as single-target mode)
-		mux.HandleFunc("/scan", proxy.HandleScan(det))
-		mux.HandleFunc("/audit", proxy.HandleAudit())
-
-		// Dashboard UI + API
-		mux.HandleFunc("/dashboard", proxy.HandleDashboard())
-		mux.HandleFunc("/dashboard/", proxy.HandleDashboard())
-		mux.HandleFunc("/dashboard/api/status", proxy.HandleDashboardStatus(rt.GetProviders(), true))
-		mux.HandleFunc("/dashboard/api/logs", proxy.HandleDashboardLogs())
-		mux.HandleFunc("/dashboard/api/reports", proxy.HandleDashboardReports())
-
-		// Chain: auth → role → router
-		var routerHandler http.Handler = rt
-		routerHandler = proxy.RoleMiddleware(defaultRole)(routerHandler)
-		if authMgr != nil {
-			routerHandler = authMgr.Middleware(routerHandler)
-		}
-		mux.Handle("/", routerHandler)
-
-		// N11: Request tracing + N8: Metrics tracking
-		handler = proxy.RequestTracingMiddleware(rl.Middleware(mux))
-
-		// N12: Config hot-reload watcher
-		go watchConfigReload(routerConfig, rt, det, v, dispatcher, defaultRole, logger)
-
-		logger.Info("router mode enabled", "config", routerConfig, "providers", rt.GetProviders())
-	} else {
-		// Single-target proxy mode (original behavior)
-		opts := []proxy.Option{proxy.WithAuth(authMgr)}
-		if dispatcher != nil {
-			opts = append(opts, proxy.WithWebhook(dispatcher))
-		}
-		srv, err := proxy.New(
-			proxy.Config{TargetURL: targetURL, DefaultRole: defaultRole},
-			det, v,
-			opts...,
-		)
-		if err != nil {
-			logger.Error("failed to create proxy", "error", err)
-			os.Exit(1)
-		}
-
-		handler = rl.Middleware(srv.Handler())
+// buildRouterHandler creates the multi-provider router handler
+func buildRouterHandler(cfg appConfig, det *detector.Detector, v *vault.Vault, authMgr *auth.Manager, rl *ratelimit.Limiter, dispatcher *webhook.Dispatcher, logger *slog.Logger) http.Handler {
+	routerCfg, err := router.LoadConfig(cfg.routerConfig)
+	if err != nil {
+		logger.Error("failed to load router config", "path", cfg.routerConfig, "error", err)
+		os.Exit(1)
 	}
 
-	// HTTP server
-	httpServer := &http.Server{
-		Addr:         listenAddr,
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 600 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	rt, err := router.New(routerCfg)
+	if err != nil {
+		logger.Error("failed to create router", "error", err)
+		os.Exit(1)
 	}
 
-	// Graceful shutdown
+	rt.SetRequestModifier(proxy.AnonymizeRequest(det, v, dispatcher))
+	rt.SetResponseModifier(proxy.RehydrateResponse(v, cfg.defaultRole))
+
+	mux := http.NewServeMux()
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	}
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("/metrics", proxy.MetricsHandler())
+	mux.HandleFunc("/scan", proxy.HandleScan(det))
+	mux.HandleFunc("/audit", proxy.HandleAudit())
+	mux.HandleFunc("/dashboard", proxy.HandleDashboard())
+	mux.HandleFunc("/dashboard/", proxy.HandleDashboard())
+	mux.HandleFunc("/dashboard/api/status", proxy.HandleDashboardStatus(rt.GetProviders(), true))
+	mux.HandleFunc("/dashboard/api/logs", proxy.HandleDashboardLogs())
+	mux.HandleFunc("/dashboard/api/reports", proxy.HandleDashboardReports())
+
+	var routerHandler http.Handler = rt
+	routerHandler = proxy.RoleMiddleware(cfg.defaultRole)(routerHandler)
+	if authMgr != nil {
+		routerHandler = authMgr.Middleware(routerHandler)
+	}
+	mux.Handle("/", routerHandler)
+
+	// N12: Config hot-reload watcher
+	go watchConfigReload(cfg.routerConfig, rt, det, v, dispatcher, cfg.defaultRole, logger)
+
+	logger.Info("router mode enabled", "config", cfg.routerConfig, "providers", rt.GetProviders())
+	return proxy.RequestTracingMiddleware(rl.Middleware(mux))
+}
+
+// buildProxyHandler creates the single-target proxy handler
+func buildProxyHandler(cfg appConfig, det *detector.Detector, v *vault.Vault, authMgr *auth.Manager, rl *ratelimit.Limiter, dispatcher *webhook.Dispatcher, logger *slog.Logger) http.Handler {
+	opts := []proxy.Option{proxy.WithAuth(authMgr)}
+	if dispatcher != nil {
+		opts = append(opts, proxy.WithWebhook(dispatcher))
+	}
+
+	srv, err := proxy.New(
+		proxy.Config{TargetURL: cfg.targetURL, DefaultRole: cfg.defaultRole},
+		det, v,
+		opts...,
+	)
+	if err != nil {
+		logger.Error("failed to create proxy", "error", err)
+		os.Exit(1)
+	}
+
+	return rl.Middleware(srv.Handler())
+}
+
+// gracefulShutdown handles server start, signal capture, and graceful stop
+func gracefulShutdown(httpServer *http.Server, redisClient *redis.Client, cfg appConfig, logger *slog.Logger) {
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		if routerConfig != "" {
-			logger.Info("proxy listening (router mode)", "addr", listenAddr)
+		if cfg.routerConfig != "" {
+			logger.Info("proxy listening (router mode)", "addr", cfg.listenAddr)
 		} else {
-			logger.Info("proxy listening", "addr", listenAddr, "target", targetURL)
+			logger.Info("proxy listening", "addr", cfg.listenAddr, "target", cfg.targetURL)
 		}
-		if tlsCert != "" && tlsKey != "" {
-			logger.Info("TLS enabled", "cert", tlsCert)
-			if err := httpServer.ListenAndServeTLS(tlsCert, tlsKey); err != nil && err != http.ErrServerClosed {
+		if cfg.tlsCert != "" && cfg.tlsKey != "" {
+			logger.Info("TLS enabled", "cert", cfg.tlsCert)
+			if err := httpServer.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey); err != nil && err != http.ErrServerClosed {
 				logger.Error("server error", "error", err)
 				os.Exit(1)
 			}
@@ -280,13 +317,10 @@ func watchConfigReload(configPath string, rt *router.Router, det *detector.Detec
 			continue
 		}
 
-		// Re-wire PII handlers
 		newRt.SetRequestModifier(proxy.AnonymizeRequest(det, v, wh))
 		newRt.SetResponseModifier(proxy.RehydrateResponse(v, defaultRole))
 
-		// Swap routes in existing router
 		rt.HotSwap(newRt)
 		logger.Info("config reloaded successfully", "providers", newRt.GetProviders())
 	}
 }
-
