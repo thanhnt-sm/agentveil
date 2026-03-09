@@ -83,16 +83,27 @@
 
 ### Security
 - **Prompt Injection Protection** — 11+ attack patterns (instruction override, jailbreak, DAN, encoding, Vietnamese-language attacks)
-- **Canary Token System** — Invisible markers to detect data leaks in LLM outputs
+- **Output Scanning** — Detect harmful content and data leaks in LLM responses via `ScanOutput()`
+- **Canary Token System** — Invisible markers to detect data leaks, persisted in Redis (24h TTL)
 - **Runtime Guardrails** — Token limits, harmful content blocking, topic filtering, session rate limiting, duration limits
-- **API Key Authentication** — HMAC-SHA256 with Redis-backed key management
+- **API Key Authentication** — HMAC-SHA256 with Redis-backed key management, 90-day TTL, O(1) revocation
 - **Rate Limiting** — Per-IP sliding window with configurable burst
+- **PII Query Param Scan** — Detects and anonymizes PII in URL query strings
 
 ### Multi-Provider Routing
 - **4 Providers** — OpenAI, Anthropic, Gemini, Ollama with unified format adapters
 - **Smart Routing** — Path-based, header-based (`X-Veil-Provider`), or load-balanced
 - **Load Balancing** — Round-robin, weighted, priority strategies
-- **Auto Failover** — Health monitoring with automatic recovery
+- **Auto Failover** — Active health probes, circuit breaker (error threshold + half-open recovery), exponential backoff with jitter
+- **WebSocket Proxy** — Bidirectional tunnel for Codex v2 `responses_websockets` transport
+- **Codex OAuth Rewrite** — Auto-detect JWT tokens and route to chatgpt.com backend
+- **Config Hot-Reload** — Update `router.yaml` without restart (auto-detected every 10s)
+
+### Observability
+- **Prometheus Metrics** — `/metrics` endpoint with 8 counters (requests, errors, PII, cache, tokens, latency)
+- **Request Tracing** — `X-Veil-Request-ID` header on all requests/responses for end-to-end correlation
+- **Structured Audit Events** — Compliance-grade JSON audit trail with PII categories, session, method, path
+- **Semantic Caching** — SHA-256 keyed Redis cache for identical prompts, reduces cost and latency
 
 ### Compliance
 - **Vietnam AI Law 2026** — 7 requirements, 4-level risk scoring (minimal/limited/high/unacceptable)
@@ -294,6 +305,9 @@ agentveil setup --undo
 | `/audit` | POST | Audit skill.md for security risks. Body: `{"content": "..."}` |
 | `/health` | GET | Health check |
 | `/healthz` | GET | Health check (alias) |
+| `/metrics` | GET | Prometheus-compatible metrics (requests, errors, PII, cache, tokens, latency) |
+| `/dashboard` | GET | Web dashboard UI |
+| `/dashboard/api/*` | GET | Dashboard API (status, logs, reports) |
 
 ### Request Headers
 
@@ -302,6 +316,7 @@ agentveil setup --undo
 | `X-User-Role` | `admin` / `viewer` / `operator` | Controls data masking level (default: `viewer`) |
 | `X-Session-ID` | Any string | Groups PII mappings per session |
 | `X-Veil-Provider` | `openai` / `anthropic` / `gemini` / `ollama` | Route to specific provider (router mode) |
+| `X-Veil-Request-ID` | UUID or custom | End-to-end request correlation (auto-generated if absent) |
 | `Authorization` | `Bearer <key>` | API authentication |
 | `x-api-key` | `<key>` | Alternative API key header |
 
@@ -325,6 +340,7 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `VEIL_RATE_BURST` | `20` | Rate limit burst size |
 | `VEIL_DEFAULT_ROLE` | `viewer` | Default role when `X-User-Role` header is absent (`admin` / `viewer` / `operator`) |
 | `VEIL_ROUTER_CONFIG` | _(empty)_ | Path to router YAML for multi-provider mode |
+| `VEIL_VAULT_TTL` | `30m` | TTL for PII mappings in Redis vault |
 | `VEIL_DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook URL for notifications |
 | `VEIL_SLACK_WEBHOOK_URL` | _(empty)_ | Slack webhook URL for notifications |
 | `VEIL_WEBHOOK_URL` | _(empty)_ | Custom webhook endpoint |
@@ -422,18 +438,25 @@ cmd/
   vura/                  CLI tool (wrap, scan, audit, compliance, setup)
 internal/
   proxy/                 Reverse proxy, middleware, SSE streaming, PII shield
+    anonymize.go         PII anonymization + audit events + query param scan
+    cache.go             Semantic cache (SHA-256, Redis, TTL)
+    metrics.go           Prometheus /metrics + request tracing
   detector/              PII scanner, anonymization engine, confidence scoring
   vault/                 Redis-backed AES-256-GCM encrypted token vault
-  auth/                  API key authentication (HMAC-SHA256)
+  auth/                  API key auth (HMAC-SHA256, O(1) revoke, 90-day TTL)
   ratelimit/             Per-IP sliding window rate limiting
   promptguard/           Prompt injection detection, canary tokens
-  guardrail/             Runtime safety policies (token limits, content filter)
+    canary_redis.go      Redis-backed persistent canary store
+  guardrail/             Runtime safety policies (auto-cleanup)
   compliance/            Vietnam AI Law 2026, EU AI Act, GDPR checker
   auditor/               skill.md static security analyzer
   router/                Multi-provider routing, load balancing, failover
+    websocket.go         WebSocket bidirectional proxy (TLS)
+    health.go            Circuit breaker, health probes, backoff
+    codex_rewrite.go     Codex OAuth JWT detection + URL rewrite
   webhook/               Event dispatcher (Discord, Slack, custom webhooks)
   media/                 Multimedia PII extraction (OCR, PDF)
-  logging/               Structured JSON logging (slog)
+  logging/               Structured audit events (slog JSON)
 pkg/pii/                 Shared PII regex patterns (Vietnam + international)
 sdk/
   go/                    Go SDK — HTTP transport wrapper
