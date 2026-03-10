@@ -91,9 +91,9 @@ func TestProxy_ViewerMasking(t *testing.T) {
 		t.Errorf("viewer should NOT see full CCCD, got: %s", respStr)
 	}
 
-	// Should contain partial data (masked format)
-	if !strings.Contains(respStr, "xx") {
-		t.Errorf("expected masked data with 'xx', got: %s", respStr)
+	// Should contain partial data (masked format with *)
+	if !strings.Contains(respStr, "**") {
+		t.Errorf("expected masked data with '**', got: %s", respStr)
 	}
 }
 
@@ -199,9 +199,9 @@ func TestMaskValue(t *testing.T) {
 		input    string
 		contains string
 	}{
-		{"012345678901", "xx"},
+		{"012345678901", "**"},
 		{"abc", "abc"},         // too short to mask
-		{"test@example.com", "xx"},
+		{"test@example.com", "**"},
 	}
 
 	for _, tt := range tests {

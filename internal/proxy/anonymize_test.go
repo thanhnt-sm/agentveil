@@ -42,8 +42,12 @@ func TestExtractSessionID_FromXRequestID(t *testing.T) {
 func TestExtractSessionID_Default(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat", nil)
 	sid := extractSessionID(req)
-	if sid != "default" {
-		t.Errorf("expected default, got %s", sid)
+	// IT3: now generates unique anon_ prefixed IDs
+	if !strings.HasPrefix(sid, "anon_") {
+		t.Errorf("expected anon_ prefix, got %s", sid)
+	}
+	if len(sid) != 21 { // "anon_" + 16 hex chars
+		t.Errorf("expected 21 char session ID, got %d: %s", len(sid), sid)
 	}
 }
 
