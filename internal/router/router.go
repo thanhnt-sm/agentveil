@@ -17,10 +17,11 @@ import (
 
 // Provider wraps config with runtime state
 type Provider struct {
-	Config  ProviderConfig
-	Target  *url.URL
-	Proxy   *httputil.ReverseProxy
-	healthy atomic.Bool
+	Config       ProviderConfig
+	Target       *url.URL
+	Proxy        *httputil.ReverseProxy
+	healthy      atomic.Bool
+	failureCount atomic.Int32 // GAP-05: consecutive failure counter for circuit breaker
 }
 
 // Router routes requests to multiple LLM providers
@@ -38,8 +39,9 @@ type Router struct {
 	// P3 #22: WebSocket proxy (nil if disabled)
 	wsProxy *WebSocketProxy
 
-	// Round-robin state
-	mu       sync.Mutex
+	// Round-robin state (RWMutex: RLock for reads in ServeHTTP, Lock for HotSwap)
+	mu       sync.RWMutex
+	rrMu     sync.Mutex // separate lock for round-robin index mutation
 	rrIndex  int
 	rrList   []string // provider names for round-robin
 
@@ -168,12 +170,22 @@ func (r *Router) buildProvider(pc ProviderConfig) (*Provider, error) {
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			slog.Warn("provider error", "provider", pc.Name, "error", err)
-			p.healthy.Store(false)
-			go func() {
-				time.Sleep(30 * time.Second)
-				p.healthy.Store(true)
-				slog.Info("provider health restored", "provider", pc.Name)
-			}()
+			// GAP-05: Circuit breaker — mark unhealthy after 3 consecutive failures
+			failures := p.failureCount.Add(1)
+			if failures >= 3 {
+				p.healthy.Store(false)
+				// Exponential backoff: 10s × failures, capped at 5 min
+				backoff := time.Duration(failures*10) * time.Second
+				if backoff > 5*time.Minute {
+					backoff = 5 * time.Minute
+				}
+				go func() {
+					time.Sleep(backoff)
+					p.healthy.Store(true)
+					p.failureCount.Store(0)
+					slog.Info("provider health restored", "provider", pc.Name)
+				}()
+			}
 			http.Error(w, fmt.Sprintf(`{"error":"provider_error","provider":"%s"}`, pc.Name), http.StatusBadGateway)
 		},
 		Transport: &http.Transport{
@@ -242,6 +254,9 @@ func (r *Router) buildLoadBalanceLists() {
 
 // ServeHTTP routes the request to the appropriate provider
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// BUG-07 FIX: RLock for consistent state reads during HotSwap
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	// P3 #22: WebSocket upgrade — proxy as a raw TCP tunnel
 	if r.wsProxy != nil && IsWebSocketUpgrade(req) {
 		providerName := r.resolveProvider(req)
@@ -404,8 +419,8 @@ func (r *Router) resolveProvider(req *http.Request) string {
 }
 
 func (r *Router) nextRoundRobin() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.rrMu.Lock()
+	defer r.rrMu.Unlock()
 
 	if len(r.rrList) == 0 {
 		return r.defaultRoute
@@ -423,8 +438,8 @@ func (r *Router) nextRoundRobin() string {
 }
 
 func (r *Router) nextWeighted() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.rrMu.Lock()
+	defer r.rrMu.Unlock()
 
 	if len(r.weightedList) == 0 {
 		return r.defaultRoute
