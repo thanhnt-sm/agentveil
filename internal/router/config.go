@@ -52,7 +52,8 @@ type RouterConfig struct {
 	Fallback     FallbackConfig      `yaml:"fallback"`
 	LoadBalance  LoadBalanceStrategy `yaml:"load_balance"`
 	DefaultRoute string              `yaml:"default_route"` // default provider name
-	CodexRewrite CodexRewriteConfig  `yaml:"codex_rewrite"` // Codex OAuth URL rewrite
+	CodexRewrite CodexRewriteConfig  `yaml:"codex_rewrite"` // Codex OAuth URL rewrite (legacy, superseded by bypass)
+	Bypass       BypassConfig        `yaml:"bypass"`         // IDE/CLI passthrough bypass
 	WebSocket    WebSocketConfig     `yaml:"websocket"`      // P3 #22: WebSocket proxy config
 }
 

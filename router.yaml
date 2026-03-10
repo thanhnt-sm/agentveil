@@ -59,6 +59,15 @@ fallback:
 load_balance: priority
 default_route: anthropic
 
-codex_rewrite:
+# IDE/CLI Passthrough Bypass — forward IDE/CLI traffic directly without processing
+# Supersedes the old codex_rewrite section
+bypass:
   enabled: true
   backend_url: https://chatgpt.com/backend-api/codex
+  user_agents:
+    - "codex-cli/"
+    - "codex/"
+    - "claude-cli/"
+    - "cursor/"
+    - "antigravity/"
+    - "openai-codex/"

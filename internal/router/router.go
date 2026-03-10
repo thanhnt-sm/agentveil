@@ -35,8 +35,11 @@ type Router struct {
 	strategy     LoadBalanceStrategy
 	fallback     FallbackConfig
 
-	// Codex OAuth URL rewriter (nil if disabled)
+	// Codex OAuth URL rewriter (nil if disabled, legacy — superseded by bypass)
 	codexRewriter *codexRewriter
+
+	// IDE/CLI passthrough bypass (nil if disabled)
+	ideBypass *ideBypass
 
 	// P3 #22: WebSocket proxy (nil if disabled)
 	wsProxy *WebSocketProxy
@@ -103,8 +106,16 @@ func New(cfg *RouterConfig) (*Router, error) {
 	// Build round-robin and weighted lists
 	r.buildLoadBalanceLists()
 
-	// Initialize Codex OAuth URL rewriter if enabled
-	if cfg.CodexRewrite.Enabled {
+	// Initialize IDE/CLI bypass if enabled (supersedes codex_rewrite)
+	if cfg.Bypass.Enabled {
+		bp, err := newIDEBypass(cfg.Bypass)
+		if err != nil {
+			return nil, err
+		}
+		r.ideBypass = bp
+		slog.Info("ide/cli bypass enabled", "backend", cfg.Bypass.BackendURL, "user_agents", cfg.Bypass.UserAgents)
+	} else if cfg.CodexRewrite.Enabled {
+		// Legacy codex_rewrite fallback (for backward compatibility)
 		backendURL := cfg.CodexRewrite.BackendURL
 		if backendURL == "" {
 			backendURL = DefaultCodexBackendURL
@@ -114,7 +125,7 @@ func New(cfg *RouterConfig) (*Router, error) {
 			return nil, err
 		}
 		r.codexRewriter = cr
-		slog.Info("codex OAuth rewrite enabled", "backend", backendURL)
+		slog.Info("codex OAuth rewrite enabled (legacy)", "backend", backendURL)
 	}
 
 	// P3 #22: Initialize WebSocket proxy if enabled
@@ -236,6 +247,7 @@ func (r *Router) HotSwap(other *Router) {
 	r.strategy = other.strategy
 	r.fallback = other.fallback
 	r.codexRewriter = other.codexRewriter
+	r.ideBypass = other.ideBypass
 	r.wsProxy = other.wsProxy
 	r.rrList = other.rrList
 	r.rrIndex = 0
@@ -276,9 +288,40 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	wsProxy := r.wsProxy
 	codexRewriter := r.codexRewriter
+	bypass := r.ideBypass
 	fallback := r.fallback
 	providers := r.providers
 	r.mu.RUnlock()
+
+	// === IDE/CLI BYPASS: Skip ALL processing for known IDE/CLI traffic ===
+	// This must be the FIRST check — before auth, PII scan, prompt guard, etc.
+	if bypass != nil {
+		if shouldBypass, reason := bypass.ShouldBypass(req); shouldBypass {
+			slog.Info("bypass: ide/cli traffic detected",
+				"reason", reason,
+				"path", req.URL.Path,
+				"method", req.Method,
+			)
+
+			// Codex traffic → forward to ChatGPT backend
+			if IsCodexPath(req.URL.Path) {
+				bypass.ServeCodex(w, req)
+				return
+			}
+
+			// Other IDE traffic → forward to resolved provider via clean proxy
+			// Uses ServeProvider (no PII anonymization, no response rehydration)
+			providerName := r.resolveProvider(req)
+			if p, ok := providers[providerName]; ok {
+				slog.Info("bypass: forwarding to provider",
+					"provider", providerName, "path", req.URL.Path)
+				req.URL.Path = r.stripRoutePrefix(req.URL.Path)
+				bypass.ServeProvider(w, req, p.Target,
+					p.Config.AuthMethod, p.Config.APIKey, p.Config.AuthParam)
+				return
+			}
+		}
+	}
 
 	// P3 #22: WebSocket upgrade — proxy as a raw TCP tunnel
 	if wsProxy != nil && IsWebSocketUpgrade(req) {
@@ -290,7 +333,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Codex OAuth rewrite: detect JWT tokens and redirect /v1/responses to ChatGPT backend
+	// Legacy Codex OAuth rewrite (only active if bypass is disabled)
 	if codexRewriter != nil && strings.HasPrefix(req.URL.Path, "/v1/responses") {
 		authHeader := req.Header.Get("Authorization")
 		if IsCodexOAuthToken(authHeader) {
