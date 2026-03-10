@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -143,12 +145,12 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 
-	// Standard JSON response - read, rehydrate, replace
-	body, err := io.ReadAll(resp.Body)
+	// Standard JSON response - read, rehydrate, replace (bounded to 50MB)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+	resp.Body.Close()
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
 
 	sessionID := extractSessionIDFromResponse(resp)
 	role := resp.Request.Header.Get("X-User-Role")
@@ -213,7 +215,7 @@ func maskValue(val string) string {
 		if i < front || i >= n-back {
 			masked[i] = runes[i]
 		} else {
-			masked[i] = 'x'
+			masked[i] = '*'
 		}
 	}
 	return string(masked)
@@ -232,7 +234,10 @@ func extractSessionID(req *http.Request) string {
 		sid = req.Header.Get("X-Request-ID")
 	}
 	if sid == "" {
-		sid = "default"
+		// IT3: Generate unique session ID to prevent cross-session PII leaks
+		b := make([]byte, 8)
+		rand.Read(b)
+		sid = "anon_" + hex.EncodeToString(b)
 	}
 	return sid
 }
@@ -282,12 +287,12 @@ func RehydrateResponse(v *vault.Vault, defaultRole string) func(*http.Response) 
 			return nil
 		}
 
-		// Standard JSON response — read, rehydrate, replace
-		body, err := io.ReadAll(resp.Body)
+		// Standard JSON response — read, rehydrate, replace (bounded to 50MB)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+		resp.Body.Close()
 		if err != nil {
 			return err
 		}
-		resp.Body.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
