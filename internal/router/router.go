@@ -254,36 +254,42 @@ func (r *Router) buildLoadBalanceLists() {
 
 // ServeHTTP routes the request to the appropriate provider
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// BUG-07 FIX: RLock for consistent state reads during HotSwap
+	// BUG-07 FIX: Snapshot references under RLock, then release before proxying.
+	// The lock MUST NOT be held during long-lived WebSocket/Codex connections.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	wsProxy := r.wsProxy
+	codexRewriter := r.codexRewriter
+	fallback := r.fallback
+	providers := r.providers
+	r.mu.RUnlock()
+
 	// P3 #22: WebSocket upgrade — proxy as a raw TCP tunnel
-	if r.wsProxy != nil && IsWebSocketUpgrade(req) {
+	if wsProxy != nil && IsWebSocketUpgrade(req) {
 		providerName := r.resolveProvider(req)
-		if p, ok := r.providers[providerName]; ok {
+		if p, ok := providers[providerName]; ok {
 			slog.Info("websocket routing", "provider", providerName, "path", req.URL.Path)
-			r.wsProxy.ServeHTTP(w, req, p.Target)
+			wsProxy.ServeHTTP(w, req, p.Target)
 			return
 		}
 	}
 
 	// Codex OAuth rewrite: detect JWT tokens and redirect /v1/responses to ChatGPT backend
-	if r.codexRewriter != nil && strings.HasPrefix(req.URL.Path, "/v1/responses") {
+	if codexRewriter != nil && strings.HasPrefix(req.URL.Path, "/v1/responses") {
 		authHeader := req.Header.Get("Authorization")
 		if IsCodexOAuthToken(authHeader) {
-			r.codexRewriter.ServeHTTP(w, req)
+			codexRewriter.ServeHTTP(w, req)
 			return
 		}
 	}
 
 	providerName := r.resolveProvider(req)
 
-	if r.fallback.Enabled {
+	if fallback.Enabled {
 		r.serveWithFallback(w, req, providerName)
 		return
 	}
 
-	p, ok := r.providers[providerName]
+	p, ok := providers[providerName]
 	if !ok || !p.healthy.Load() {
 		http.Error(w, `{"error":"no_healthy_provider"}`, http.StatusServiceUnavailable)
 		return

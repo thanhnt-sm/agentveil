@@ -112,7 +112,7 @@ func newCodexRewriter(backendURL string) (*codexRewriter, error) {
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			slog.Error("codex rewrite: upstream error", "error", err)
-			http.Error(w, `{"error":"codex_backend_error","message":"`+err.Error()+`"}`, http.StatusBadGateway)
+			http.Error(w, `{"error":"codex_backend_error","message":"failed to reach Codex backend"}`, http.StatusBadGateway)
 		},
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: 120 * time.Second, // Codex responses can be slow
