@@ -25,7 +25,6 @@ func TestScan_CCCD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := d.Scan(tt.input)
 
 			catMatches := filterByCategory(matches, tt.cat)
@@ -63,7 +62,6 @@ func TestScan_Phone(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatPhone)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d phone matches, got %d", tt.expect, len(matches))
@@ -88,7 +86,6 @@ func TestScan_Email(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatEmail)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d email matches, got %d", tt.expect, len(matches))
@@ -113,7 +110,6 @@ func TestScan_TIN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatTIN)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d TIN matches, got %d", tt.expect, len(matches))
@@ -144,7 +140,6 @@ func TestScan_Address(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatAddress)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d address matches, got %d", tt.expect, len(matches))
@@ -228,7 +223,6 @@ func TestScan_Passport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatPassport)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d passport matches, got %d", tt.expect, len(matches))
@@ -249,7 +243,6 @@ func TestScan_LicensePlate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatLicPlate)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d plate matches, got %d", tt.expect, len(matches))
@@ -271,7 +264,6 @@ func TestScan_DOB(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatDOB)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d DOB matches, got %d", tt.expect, len(matches))
@@ -292,7 +284,6 @@ func TestScan_CreditCard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatCreditCard)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d card matches, got %d", tt.expect, len(matches))
@@ -321,7 +312,6 @@ func TestScan_IPv4(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), pii.CatIPAddr)
 			if len(matches) != tt.expect {
 				t.Errorf("expected %d IP matches, got %d", tt.expect, len(matches))
@@ -562,7 +552,6 @@ func TestScan_SecretKeys(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d.ResetCounters()
 			matches := filterByCategory(d.Scan(tt.input), tt.cat)
 			if len(matches) != tt.expect {
 				all := d.Scan(tt.input)
@@ -673,7 +662,6 @@ func BenchmarkAnonymize(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		d.ResetCounters()
 		d.Anonymize(input)
 	}
 }

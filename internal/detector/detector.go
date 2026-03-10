@@ -2,8 +2,6 @@ package detector
 
 import (
 	"fmt"
-	"sync"
-	"sync/atomic"
 
 	"github.com/vurakit/agentveil/pkg/pii"
 )
@@ -49,10 +47,8 @@ func DefaultConfig() Config {
 
 // Detector scans text for PII and produces pseudonymized tokens
 type Detector struct {
-	patterns    []pii.Pattern
-	mu          sync.Mutex
-	counters    map[pii.Category]*atomic.Int64
-	config      Config
+	patterns []pii.Pattern
+	config   Config
 }
 
 // New creates a Detector loaded with all PII patterns
@@ -62,11 +58,6 @@ func New() *Detector {
 
 // NewWithConfig creates a Detector with custom configuration
 func NewWithConfig(cfg Config) *Detector {
-	counters := make(map[pii.Category]*atomic.Int64)
-	for cat := range pii.TokenPrefix {
-		counters[cat] = &atomic.Int64{}
-	}
-
 	var patterns []pii.Pattern
 	if cfg.EnableVietnam {
 		patterns = append(patterns, pii.VietnamPatterns()...)
@@ -80,7 +71,6 @@ func NewWithConfig(cfg Config) *Detector {
 
 	return &Detector{
 		patterns: patterns,
-		counters: counters,
 		config:   cfg,
 	}
 }
@@ -190,6 +180,8 @@ func (d *Detector) Scan(text string) []Match {
 	var matches []Match
 	seen := make(map[string]string) // original -> token (dedup within same scan)
 	threshold := minConfidence(d.config.Sensitivity)
+	// BUG-01 FIX: per-scan counters keep tokens clean ([EMAIL_1] per request)
+	localCounters := make(map[pii.Category]int64)
 
 	for _, p := range d.patterns {
 		locs := p.Regex.FindAllStringIndex(text, -1)
@@ -222,14 +214,8 @@ func (d *Detector) Scan(text string) []Match {
 					// Secrets: partial mask (show ~40%, hide rest with *)
 					token = pii.PartialMask(original)
 				} else {
-					counter := d.counters[p.Category]
-					if counter == nil {
-						counter = &atomic.Int64{}
-						d.mu.Lock()
-						d.counters[p.Category] = counter
-						d.mu.Unlock()
-					}
-					idx := counter.Add(1)
+					localCounters[p.Category]++
+					idx := localCounters[p.Category]
 					prefix := pii.TokenPrefix[p.Category]
 					token = fmt.Sprintf("[%s_%d]", prefix, idx)
 				}
@@ -276,16 +262,18 @@ func (d *Detector) Anonymize(text string) (string, map[string]string) {
 	return result, mapping
 }
 
-// ResetCounters resets the per-category token counters
-func (d *Detector) ResetCounters() {
-	for _, c := range d.counters {
-		c.Store(0)
-	}
-}
 
+
+// BUG-02 FIX: Sort by position descending, then by confidence descending
+// so that higher-confidence matches win when overlapping at same position.
 func sortByPosDesc(matches []Match) {
 	for i := 1; i < len(matches); i++ {
-		for j := i; j > 0 && matches[j].Start > matches[j-1].Start; j-- {
+		for j := i; j > 0; j-- {
+			swapNeeded := matches[j].Start > matches[j-1].Start ||
+				(matches[j].Start == matches[j-1].Start && matches[j].Confidence > matches[j-1].Confidence)
+			if !swapNeeded {
+				break
+			}
 			matches[j], matches[j-1] = matches[j-1], matches[j]
 		}
 	}

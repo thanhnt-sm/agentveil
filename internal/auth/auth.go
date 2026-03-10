@@ -54,7 +54,7 @@ func (m *Manager) GenerateKey(ctx context.Context, role Role, label string) (str
 	plaintext := "veil_sk_" + hex.EncodeToString(raw)
 
 	hash := hashKey(plaintext)
-	id := hash[:12]
+	id := hash[:16] // BUG-16 FIX: 64-bit ID (collision at ~4B keys vs 16M)
 
 	key := &APIKey{
 		ID:        id,

@@ -93,6 +93,12 @@ func (v *Vault) LookupAll(ctx context.Context, sessionID string) (map[string]str
 		}
 		result[token] = val
 	}
+
+	// GAP-01 FIX: Refresh TTL on access to prevent expiration during long sessions
+	if len(result) > 0 {
+		v.client.Expire(ctx, sessionKey(sessionID), v.ttl)
+	}
+
 	return result, nil
 }
 

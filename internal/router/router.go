@@ -382,9 +382,13 @@ func (r *Router) resolveProvider(req *http.Request) string {
 	}
 
 	// 2. Check path-based routes (sorted by prefix length desc for deterministic matching)
+	// BUG-09 FIX: skip unhealthy providers, fall through to load balancing
 	for _, prefix := range r.sortedRoutes {
 		if strings.HasPrefix(req.URL.Path, prefix) {
-			return r.routes[prefix].Provider
+			providerName := r.routes[prefix].Provider
+			if p, ok := r.providers[providerName]; ok && p.healthy.Load() {
+				return providerName
+			}
 		}
 	}
 
