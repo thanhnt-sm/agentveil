@@ -1,10 +1,12 @@
 package router
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -116,6 +118,17 @@ func newCodexRewriter(backendURL string) (*codexRewriter, error) {
 		},
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: 120 * time.Second, // Codex responses can be slow
+			// CONN-02: Production-grade connection settings
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+			MaxIdleConns:        20,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 		},
 	}
 

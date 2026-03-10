@@ -2,9 +2,11 @@ package router
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -163,6 +165,10 @@ func (r *Router) buildProvider(pc ProviderConfig) (*Provider, error) {
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// CONN-07: Reset failure count on successful response
+			if resp.StatusCode < 500 {
+				p.failureCount.Store(0)
+			}
 			if r.responseModifier != nil {
 				return r.responseModifier(resp)
 			}
@@ -190,6 +196,17 @@ func (r *Router) buildProvider(pc ProviderConfig) (*Provider, error) {
 		},
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: time.Duration(pc.TimeoutSec) * time.Second,
+			// CONN-01: Production-grade connection settings
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 		},
 	}
 

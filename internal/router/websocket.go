@@ -164,12 +164,21 @@ func dialUpstream(target *url.URL) (net.Conn, error) {
 
 	if useTLS {
 		return tls.DialWithDialer(
-			&net.Dialer{Timeout: 10 * time.Second},
+			&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second, // CONN-03: prevent NAT/firewall drops
+			},
 			"tcp", host,
-			&tls.Config{ServerName: target.Hostname()},
+			&tls.Config{
+				ServerName: target.Hostname(),
+				MinVersion: tls.VersionTLS12,
+			},
 		)
 	}
-	return net.DialTimeout("tcp", host, 10*time.Second)
+	return (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).Dial("tcp", host)
 }
 
 // buildUpgradeRequest constructs the HTTP upgrade request for upstream

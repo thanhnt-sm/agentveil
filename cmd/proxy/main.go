@@ -95,8 +95,14 @@ func loadConfig() appConfig {
 // connectRedis creates a Redis client and tests the connection
 func connectRedis(addr, password string, logger *slog.Logger) *redis.Client {
 	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
+		Addr:         addr,
+		Password:     password,
+		// CONN-04: Production Redis settings
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     20,
+		MinIdleConns: 5,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
