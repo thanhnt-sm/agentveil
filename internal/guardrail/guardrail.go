@@ -2,6 +2,7 @@ package guardrail
 
 import (
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -86,6 +87,8 @@ func New(policy Policy) *Guardrail {
 	for _, rule := range policy.CustomRules {
 		compiled, err := regexp.Compile(rule.Pattern)
 		if err != nil {
+			slog.Warn("guardrail: invalid custom rule pattern, skipping",
+				"rule_id", rule.ID, "pattern", rule.Pattern, "error", err)
 			continue
 		}
 		g.customCompiled = append(g.customCompiled, compiledRule{

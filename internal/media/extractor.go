@@ -52,6 +52,13 @@ func (e *Extractor) Available() map[FileType]bool {
 // ExtractFromBase64 decodes a base64 data blob and extracts text.
 // fileType should be "image" or "pdf".
 func (e *Extractor) ExtractFromBase64(data string, ft FileType) (*ExtractionResult, error) {
+	// IT2-05: Reject oversized base64 data to prevent OOM (50MB decoded limit)
+	if len(data) > 50*1024*1024*4/3 { // base64 overhead ~4/3
+		return &ExtractionResult{
+			FileType: ft,
+			Error:    "base64 data too large (>50MB decoded)",
+		}, nil
+	}
 	raw, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		return nil, fmt.Errorf("decode base64: %w", err)

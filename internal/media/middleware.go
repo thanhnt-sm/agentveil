@@ -48,11 +48,12 @@ func (sm *ScanMiddleware) Middleware(next http.Handler) http.Handler {
 
 		// Read body for media scanning (bounded to 10MB)
 		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+		r.Body.Close()
 		if err != nil {
+			r.Body = io.NopCloser(bytes.NewReader(nil))
 			next.ServeHTTP(w, r)
 			return
 		}
-		r.Body.Close()
 
 		// Restore body for downstream handlers
 		r.Body = io.NopCloser(bytes.NewReader(body))

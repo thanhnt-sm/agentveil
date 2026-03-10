@@ -148,6 +148,7 @@ func (d *Dispatcher) Emit(event Event) {
 // Close stops the dispatcher and waits for pending events
 func (d *Dispatcher) Close() {
 	close(d.closed)
+	close(d.eventChan) // signal worker to drain remaining and exit
 	d.wg.Wait()
 }
 
@@ -155,18 +156,17 @@ func (d *Dispatcher) worker() {
 	defer d.wg.Done()
 	for {
 		select {
-		case event := <-d.eventChan:
+		case event, ok := <-d.eventChan:
+			if !ok {
+				return // channel closed, all events drained
+			}
 			d.dispatch(event)
 		case <-d.closed:
-			// Drain remaining events
-			for {
-				select {
-				case event := <-d.eventChan:
-					d.dispatch(event)
-				default:
-					return
-				}
+			// Drain remaining events from channel
+			for event := range d.eventChan {
+				d.dispatch(event)
 			}
+			return
 		}
 	}
 }
